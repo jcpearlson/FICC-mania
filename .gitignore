@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+.DS_Store
+headers.local.json
