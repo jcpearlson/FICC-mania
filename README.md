@@ -8,7 +8,18 @@ login, no paid API. Every number on the page can be traced to a public endpoint.
 uv run streamlit run app.py
 ```
 
-That is the whole setup. `uv` resolves the environment on first run.
+That is the whole setup. `uv` resolves the environment on first run. The app
+binds to `localhost` only — it has no authentication, so read
+[SECURITY.md](SECURITY.md) before exposing it on a network.
+
+> **This is not investment advice, and it is not a financial product.** It is a
+> personal research tool that reads public data and does arithmetic on it.
+> Figures may be wrong, stale, misattributed, or silently missing — several
+> upstream sources have changed or broken during development alone. Nothing
+> here is verified against a vendor system, nothing is suitable for trading,
+> valuation, reporting, or any regulated purpose, and the software is provided
+> without warranty of any kind. Verify independently before you act on
+> anything you see here.
 
 ---
 
@@ -191,3 +202,35 @@ pasted headers usually carry session cookies.
 
 See `BACKLOG.md` for what is blocked, what is licensed, and what is deliberately
 left out.
+
+## Data terms — read before you fork or redistribute
+
+**The MIT licence in this repository covers the source code only.** It grants
+you nothing in respect of the data the code retrieves. This project ships **no
+market data**: there is no vendored dataset, no committed cache, no snapshot in
+the git history. Everything is fetched at runtime, on your machine, under your
+own relationship with each provider. That distinction is what keeps the repo
+redistributable — and it is your responsibility to keep it that way.
+
+| Source | Status | What it means for you |
+|---|---|---|
+| US Treasury, Federal Reserve (FRED host), NY Fed, MOF Japan | US/Japanese government publications, generally free to use | Attribute the source; do not imply endorsement |
+| **ICE BofA index data via FRED** (`BAML*` series) | **Third-party licensed content**, owned by ICE Data Indices, LLC and redistributed by FRED under its own terms | Personal/research use as served by FRED. **Do not redistribute these series, cache them publicly, or build a commercial product on them** without checking ICE's and FRED's terms |
+| **Yahoo Finance via `yfinance`** | **Unofficial.** `yfinance` reads a public web endpoint that Yahoo does not document or support for this purpose, and Yahoo's Terms of Service restrict automated access and redistribution | Personal use at your own risk. It can break or start refusing requests at any time. **Do not build a commercial or redistributed service on it** |
+
+Three practical rules if you run or fork this:
+
+1. **Do not commit the `.cache/` directory.** It is gitignored for a reason —
+   committing it would turn "fetches data at runtime" into "redistributes
+   licensed data", which is the one thing the structure above is designed to
+   avoid.
+2. **Be polite to the sources.** `ficc/http.py` enforces a minimum interval
+   between calls per source and `ficc/cache.py` caches to disk with TTLs matched
+   to each series' publication cadence. This is deliberate — FRED reproducibly
+   returns empty responses when hit concurrently. Do not remove the throttling
+   or the cache to "make it faster"; you will get the endpoint blocked, for you
+   and for everyone.
+3. **These endpoints are undocumented and can vanish.** Several changed during
+   development: stooq went behind a proof-of-work wall, and FRED silently caps
+   the licensed credit series at three years. Expect breakage; treat a missing
+   panel as normal rather than as a bug in your setup.

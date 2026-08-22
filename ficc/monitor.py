@@ -25,6 +25,7 @@ import pandas as pd
 from . import analytics as an
 from . import sparkline as sp
 from . import theme
+from .ui import esc
 from .contract import Series
 
 LOOKBACKS = (("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63))
@@ -108,13 +109,13 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
         if not live:
             continue
         body.append(
-            f'<tr class="mon-grp"><td colspan="{ncols}">{gname}</td></tr>')
+            f'<tr class="mon-grp"><td colspan="{ncols}">{esc(gname)}</td></tr>')
         for r in live:
             ser = r.series
             z = an.zscore(ser, spark_years) if ser is not None else None
             pct = z.pct if z else None
 
-            cells = [f'<td class="mon-name">{r.label}</td>',
+            cells = [f'<td class="mon-name">{esc(r.label)}</td>',
                      f'<td class="mon-val">{_fmt(r.value, r.dp)}'
                      f'<span class="mon-unit">{r.unit}</span></td>',
                      f'<td class="mon-spk">{sp.spark(ser)}</td>']

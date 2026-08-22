@@ -8,6 +8,7 @@ trails the series' expected cadence. The pull time lives in the header, once.
 from __future__ import annotations
 
 import datetime as dt
+import html as _html
 
 import streamlit as st
 
@@ -101,6 +102,18 @@ def badge_html(s: Series) -> str:
             f'{icon} {text}</span>')
 
 
+def esc(v: object) -> str:
+    """Escape a value before it goes into an `unsafe_allow_html` block.
+
+    Every label in this app is currently a hardcoded constant, so nothing here
+    is exploitable today. That is a property of the current call sites, not of
+    the rendering code -- the moment a label, source name or error string comes
+    from a fetched payload, an unescaped f-string becomes an injection. Escaping
+    at the boundary means that change stays safe by default.
+    """
+    return _html.escape(str(v), quote=True)
+
+
 def fmt(v: float | None, dp: int = 2, plus: bool = False) -> str:
     if v is None or v != v:
         return "—"
@@ -122,7 +135,7 @@ def tile(label: str, value: float | None, s: Series | None = None, *,
     val = fmt(value, dp)
     parts = [
         '<div class="ficc-card">',
-        f'<p class="ficc-tile-label">{label}</p>',
+        f'<p class="ficc-tile-label">{esc(label)}</p>',
         f'<p class="ficc-tile-value">{val}'
         f'{f"<span class=ficc-tile-unit>{unit}</span>" if unit else ""}</p>',
     ]
@@ -146,7 +159,7 @@ def tile_row(tiles: list[str]) -> None:
 
 def section(title: str, note: str = "") -> None:
     st.markdown(
-        f'<div class="ficc-section"><h2>{title}</h2><span>{note}</span></div>',
+        f'<div class="ficc-section"><h2>{esc(title)}</h2>'        f'<span>{esc(note)}</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -160,7 +173,7 @@ def sources_note(series: list[Series]) -> None:
     bits = []
     for src, s in seen.items():
         stamp = f"{s.as_of:%d %b %Y}" if s.as_of else "n/a"
-        bits.append(f"{src} · obs {stamp}")
+        bits.append(f"{esc(src)} · obs {stamp}")
     if bits:
         st.markdown(
             f'<div style="font-size:10.5px;color:{theme.MUTED};margin-top:4px">'
@@ -170,7 +183,7 @@ def sources_note(series: list[Series]) -> None:
 def failures_note(series: list[Series]) -> None:
     bad = [s for s in series if s is not None and s.freshness.value == "failed"]
     if bad:
-        names = ", ".join(f"{s.label}" for s in bad[:6])
+        names = ", ".join(esc(s.label) for s in bad[:6])
         st.markdown(
             f'<div style="font-size:11px;color:{theme.WARNING};margin-top:6px">'
             f'▲ Unavailable this pull: {names}</div>', unsafe_allow_html=True)
