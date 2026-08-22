@@ -9,6 +9,11 @@ font = "sans serif"
 [server]
 headless = true
 fileWatcherType = "auto"
+# Bind loopback only. Streamlit's default is every interface, which would put
+# an app with no authentication of any kind onto the local network (and onto
+# the internet behind a forwarded port). Change this only if you have put an
+# authenticating proxy in front of it -- see SECURITY.md.
+address = "localhost"
 
 [browser]
 gatherUsageStats = false
