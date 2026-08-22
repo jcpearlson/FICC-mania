@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE ON DATA: this license covers the SOFTWARE ONLY. It does not grant any
-rights to the market data the software retrieves at runtime, which remains
-subject to each provider's own terms. See the "Data terms" section of
-README.md before redistributing anything this software produces.

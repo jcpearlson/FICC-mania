@@ -205,8 +205,10 @@ left out.
 
 ## Data terms — read before you fork or redistribute
 
-**The MIT licence in this repository covers the source code only.** It grants
-you nothing in respect of the data the code retrieves. This project ships **no
+**The MIT licence in [LICENSE](LICENSE) covers the source code only.** It is
+verbatim MIT and says nothing about data, because the data is not ours to
+license — it grants you no rights whatsoever in respect of anything the code
+retrieves at runtime. This project ships **no
 market data**: there is no vendored dataset, no committed cache, no snapshot in
 the git history. Everything is fetched at runtime, on your machine, under your
 own relationship with each provider. That distinction is what keeps the repo
