@@ -22,7 +22,7 @@ import streamlit as st
 
 from .. import analytics as an
 from .. import theme, ui
-from ..sources import fred, market, treasury
+from ..sources import fred, market
 
 WEIGHTS = {"credit": 0.25, "vol": 0.25, "funding": 0.20, "growth": 0.15, "trend": 0.15}
 
@@ -71,27 +71,37 @@ def _components(f, slow, mkt) -> dict[str, float]:
     return out
 
 
-def render() -> None:
-    f, slow, mkt = _load()
-    comp = _components(f, slow, mkt)
+def composite(comp: dict[str, float]) -> tuple[float, str, str]:
+    """Weighted regime score, its label, and its band colour.
 
+    Missing components drop out and the remaining weights are renormalised,
+    so one dead source shifts the score's composition, not its scale. The
+    dashboard strip and this page both call this, so they cannot disagree.
+    """
     valid = {k: v for k, v in comp.items() if v == v}
     if valid:
-        wsum = sum(WEIGHTS[k] for k in valid)
-        score = sum(WEIGHTS[k] * v for k, v in valid.items()) / wsum
+        score = (sum(WEIGHTS[k] * v for k, v in valid.items())
+                 / sum(WEIGHTS[k] for k in valid))
     else:
         score = float("nan")
     _, label = an.regime_score({"s": score})
-
-    band = (theme.CRITICAL if score <= -0.5 else theme.SERIOUS if score <= -0.15
+    band = (theme.MUTED if score != score
+            else theme.CRITICAL if score <= -0.5 else theme.SERIOUS if score <= -0.15
             else theme.INK_2 if score < 0.15 else theme.GOOD)
+    return score, label, band
+
+
+def render() -> None:
+    f, slow, mkt = _load()
+    comp = _components(f, slow, mkt)
+    score, label, band = composite(comp)
 
     c1, c2 = st.columns([1, 2.4])
     with c1:
         st.markdown(
             f"""<div class="ficc-card">
               <p class="ficc-tile-label">Cross-asset risk regime</p>
-              <p class="ficc-tile-value" style="font-size:40px;color:{band}">{score:+.2f}</p>
+              <p class="ficc-tile-value" style="font-size:40px;color:{band}">{ui.fmt(score, 2, plus=True)}</p>
               <div style="margin:8px 0 2px 0">
                 <span class="ficc-regime" style="background:{band}22;color:{band}">{label}</span>
               </div>
@@ -142,32 +152,31 @@ def render() -> None:
                "where the composite averages away the disagreement — the pairs worth a second look")
     pairs = []
 
-    def _add(name: str, a, b, a_lbl: str, b_lbl: str, inv_a=False, inv_b=False, note=""):
+    def _add(name: str, a, b, inv_a=False, inv_b=False, note=""):
         if a is None or b is None or not a.ok or not b.ok:
             return
         za, zb = an.signed_z(a.col, 5, inv_a), an.signed_z(b.col, 5, inv_b)
         if za != za or zb != zb:
             return
-        pairs.append({"pair": name, a_lbl: za, b_lbl: zb, "gap": za - zb, "note": note})
+        pairs.append({"pair": name, "gap": za - zb, "note": note})
 
-    _add("Credit vs equity vol", hy, f.get("VIXCLS"), "a", "b", True, True,
+    _add("Credit vs equity vol", hy, f.get("VIXCLS"), True, True,
          "HY calm while VIX is bid (or the reverse) is the classic pre-drawdown tell")
-    _add("Rate vol vs equity vol", mkt.get("^MOVE"), f.get("VIXCLS"), "a", "b", True, True,
+    _add("Rate vol vs equity vol", mkt.get("^MOVE"), f.get("VIXCLS"), True, True,
          "MOVE usually moves first in genuine macro events")
-    _add("Copper/gold vs 10y", None, None, "a", "b")
     cu, au, ten = mkt.get("HG=F"), mkt.get("GC=F"), f.get("DGS10")
     if cu and au and ten and cu.ok and au.ok and ten.ok:
         za = an.signed_z(an.ratio(cu.col, au.col), 5)
         zb = an.signed_z(ten.col, 5)
-        pairs.append({"pair": "Copper/gold vs 10y", "a": za, "b": zb, "gap": za - zb,
+        pairs.append({"pair": "Copper/gold vs 10y", "gap": za - zb,
                       "note": "growth proxy against the rate market's growth view"})
-    _add("Credit vs financial conditions", hy, slow.get("NFCI"), "a", "b", True, True,
+    _add("Credit vs financial conditions", hy, slow.get("NFCI"), True, True,
          "spreads against the official conditions read")
-    _add("Skew vs vol", mkt.get("^SKEW"), f.get("VIXCLS"), "a", "b", True, True,
+    _add("Skew vs vol", mkt.get("^SKEW"), f.get("VIXCLS"), True, True,
          "tail hedging demand against spot vol")
 
-    if pairs:
-        df = pd.DataFrame([p for p in pairs if "a" in p and p["a"] == p["a"]])
+    if any(p["gap"] == p["gap"] for p in pairs):
+        df = pd.DataFrame([p for p in pairs if p["gap"] == p["gap"]])
         df = df.reindex(df["gap"].abs().sort_values(ascending=False).index)
         c1, c2 = st.columns([1.15, 1])
         with c1:
@@ -218,12 +227,10 @@ def render() -> None:
             ui.chart(fig, height=300, unified=False)
     with c2:
         rows = []
-        for name, s, inv in (("HY OAS", hy, True), ("IG OAS", f.get("BAMLC0A0CM"), True),
-                             ("VIX", f.get("VIXCLS"), True), ("MOVE", mkt.get("^MOVE"), True),
-                             ("10y UST", f.get("DGS10"), False),
-                             ("2s10s", f.get("T10Y2Y"), False),
-                             ("NFCI", slow.get("NFCI"), True),
-                             ("DXY", mkt.get("DX-Y.NYB"), False)):
+        for name, s in (("HY OAS", hy), ("IG OAS", f.get("BAMLC0A0CM")),
+                        ("VIX", f.get("VIXCLS")), ("MOVE", mkt.get("^MOVE")),
+                        ("10y UST", f.get("DGS10")), ("2s10s", f.get("T10Y2Y")),
+                        ("NFCI", slow.get("NFCI")), ("DXY", mkt.get("DX-Y.NYB"))):
             if s and s.ok:
                 z = an.zscore(s.col, 5)
                 if z:

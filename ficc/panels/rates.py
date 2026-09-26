@@ -16,7 +16,19 @@ import streamlit as st
 
 from .. import analytics as an
 from .. import theme, ui
-from ..sources import fred, market, mof, nyfed, treasury
+from ..sources import ecb, fred, market, mof, nyfed, treasury, treasurydirect
+
+# Fed balance sheet plumbing. Units differ at source and are reconciled in
+# analytics.net_liquidity -- WALCL is $mn, the rest $bn.
+PLUMBING = {
+    "WALCL": ("Fed total assets ($mn)", 7),
+    "WTREGEN": ("Treasury General Account ($bn)", 7),
+    "RRPONTSYD": ("ON RRP take-up ($bn)", 1),
+    "WRESBAL": ("Reserve balances ($bn)", 7),
+}
+# Front-end credit: lower-tier (A2/P2) minus AA non-financial 90-day CP.
+CP = {"RIFSPPNA2P2D90NB": "A2/P2 nonfinancial CP 90d",
+      "DCPN3M": "AA nonfinancial CP 90d"}
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -41,9 +53,34 @@ def _load(years: list[int]):
     return (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg, extras, move, real)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_extra():
+    """Newer sources, loaded apart from `_load` so its tuple stays stable."""
+    plumbing = {k: fred.get(k, lbl, cadence_days=cad) for k, (lbl, cad) in PLUMBING.items()}
+    cp = fred.many(CP)
+    eur = ecb.curve()
+    estr = ecb.estr()
+    auctions = treasurydirect.auctions()
+    return plumbing, cp, eur, estr, auctions
+
+
+def cp_spread(cp: dict) -> pd.Series | None:
+    """A2/P2 minus AA 90-day CP in bp, on dates both published.
+
+    The two series are released a day apart; an inner join keeps a spread
+    from ever pairing today's A2/P2 with yesterday's AA.
+    """
+    a, b = cp.get("RIFSPPNA2P2D90NB"), cp.get("DCPN3M")
+    if not (a and b and a.ok and b.ok):
+        return None
+    d = pd.concat([a.col.rename("a"), b.col.rename("b")], axis=1, join="inner").dropna()
+    return ((d["a"] - d["b"]) * 100).rename("cp_spread") if len(d) else None
+
+
 def render(years: list[int]) -> None:
     (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg,
      extras, move, real) = _load(years)
+    plumbing, cp, eur, estr, auctions = _load_extra()
 
     # ---- headline tiles ------------------------------------------------
     tiles = []
@@ -78,7 +115,15 @@ def render(years: list[int]) -> None:
     with c1:
         fig = go.Figure()
         if ust.ok:
-            snap = an.curve_snapshot(ust.frame, treasury.TENORS, offsets=(0,))
+            snap = an.curve_snapshot(ust.frame, treasury.TENORS, offsets=(0, 21))
+            ago = snap[snap.offset == 21]
+            if len(ago):
+                # A faint month-ago curve turns "the curve" into "how the curve
+                # moved", which is the question a level alone cannot answer.
+                fig.add_trace(go.Scatter(
+                    x=ago["years"], y=ago["yield"], name="UST 1m ago",
+                    mode="lines", line=dict(width=1.4, color=theme.BLUE, dash="dot"),
+                    opacity=0.55, hovertemplate="%{y:.2f}%<extra>UST 1m ago</extra>"))
             cur = snap[snap.offset == 0]
             fig.add_trace(go.Scatter(
                 x=cur["years"], y=cur["yield"], name="UST par curve",
@@ -111,8 +156,18 @@ def render(years: list[int]) -> None:
                     line=dict(width=2, color=theme.VIOLET, dash="dash"),
                     marker=dict(size=6),
                     hovertemplate="%{y:.2f}%<extra>UST real</extra>"))
+        if eur.ok:
+            er = eur.frame.iloc[-1]
+            pts = [(ecb.TENORS[c], float(er[c])) for c in eur.frame.columns
+                   if c in ecb.TENORS and pd.notna(er[c])]
+            if pts:
+                fig.add_trace(go.Scatter(
+                    x=[p[0] for p in pts], y=[p[1] for p in pts],
+                    name="EUR AAA spot (ECB)", mode="lines+markers",
+                    line=dict(width=2, color=theme.YELLOW), marker=dict(size=6),
+                    hovertemplate="%{y:.2f}%<extra>EUR AAA</extra>"))
         fig.update_layout(
-            title="Four curves — UST nominal & real, SOFR forward, JGB",
+            title="Curves — UST nominal & real, SOFR forward, JGB, EUR AAA",
             xaxis=dict(title="Years", type="log",
                        tickvals=[0.25, 0.5, 1, 2, 3, 5, 7, 10, 20, 30],
                        ticktext=["3m", "6m", "1y", "2y", "3y", "5y", "7y", "10y", "20y", "30y"]),
@@ -125,7 +180,9 @@ def render(years: list[int]) -> None:
             "strip, each futures point placed at the midpoint of the quarter it "
             "settles on. A par yield is an <em>average</em> of forwards to that "
             "maturity, so in an upward-sloping market the forward strip sits above "
-            "the par curve by construction — that gap is geometry, not value."
+            "the par curve by construction — that gap is geometry, not value. "
+            "The EUR line is the ECB's fitted AAA <em>spot</em> curve, not par; the "
+            "difference is a few bp and does not change the shape."
             "</div>", unsafe_allow_html=True)
 
     with c2:
@@ -331,6 +388,133 @@ def render(years: list[int]) -> None:
                 "means cash is getting scarce relative to collateral.</div>",
                 unsafe_allow_html=True)
 
+    _plumbing(plumbing, cp)
+    _auctions(auctions)
+
     ui.failures_note([ust, jgb, sofr_fwd, ff, sofr_on, effr, move, real,
-                      *extras.values()])
-    ui.sources_note([ust, jgb, sofr_fwd, sofr_on, real])
+                      *extras.values(), *plumbing.values(), *cp.values(),
+                      eur, estr, auctions])
+    ui.sources_note([ust, jgb, sofr_fwd, sofr_on, real, eur, auctions])
+
+
+def _plumbing(plumbing: dict, cp: dict) -> None:
+    """Liquidity: how much central-bank cash is in the system, and front-end credit."""
+    ui.section("Liquidity & plumbing",
+               "Fed balance sheet net of TGA and RRP, reserves, and front-end credit stress")
+    c1, c2, c3 = st.columns(3)
+    w, t, r = (plumbing.get(k) for k in ("WALCL", "WTREGEN", "RRPONTSYD"))
+    with c1:
+        if all(s_ and s_.ok for s_ in (w, t, r)):
+            nl = an.net_liquidity(w.col, t.col, r.col).tail(260)
+            if len(nl):
+                chg = float(nl.iloc[-1] - nl.iloc[-5]) * 1e3 if len(nl) > 4 else None
+                fig = go.Figure(go.Scatter(
+                    x=nl.index, y=nl, name="Net liquidity",
+                    line=dict(width=2, color=theme.BLUE, shape="hv"),
+                    hovertemplate="$%{y:.2f}tn<extra></extra>"))
+                fig.update_layout(
+                    title=f"Net liquidity · ${nl.iloc[-1]:.2f}tn"
+                          + (f" ({chg:+,.0f}bn over 4w)" if chg is not None else ""),
+                    yaxis=dict(title="$ trillions", tickprefix="$"))
+                ui.chart(fig, height=280, legend=False)
+                st.markdown(
+                    f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
+                    "Fed total assets − Treasury General Account − ON RRP, weekly. "
+                    "A market shorthand, not an identity: it tracks risk assets loosely "
+                    "and breaks whenever balance-sheet composition changes.</div>",
+                    unsafe_allow_html=True)
+    with c2:
+        res, rrp = plumbing.get("WRESBAL"), r
+        fig = go.Figure()
+        for s_, name, color in ((res, "Reserves", theme.AQUA),
+                                (rrp, "ON RRP", theme.ORANGE)):
+            if s_ and s_.ok:
+                d = (s_.col / 1e3).tail(1100)
+                fig.add_trace(go.Scatter(x=d.index, y=d, name=name,
+                                         line=dict(width=2, color=color),
+                                         hovertemplate="$%{y:.2f}tn<extra>"
+                                                       f"{name}</extra>"))
+        if fig.data:
+            fig.update_layout(title="Reserves vs ON RRP — where the cash sits",
+                              yaxis=dict(title="$ trillions", tickprefix="$"))
+            ui.chart(fig, height=280)
+            st.markdown(
+                f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
+                "Once RRP is drained, further QT comes straight out of reserves — "
+                "watch this alongside SOFR−IORB above.</div>", unsafe_allow_html=True)
+    with c3:
+        sp = cp_spread(cp)
+        if sp is not None:
+            sp = sp.tail(750)
+            z = an.zscore(sp, 3)
+            fig = go.Figure(go.Scatter(x=sp.index, y=sp, name="A2/P2 − AA",
+                                       line=dict(width=2, color=theme.MAGENTA),
+                                       hovertemplate="%{y:.0f} bp<extra></extra>"))
+            fig.update_layout(
+                title=f"CP quality spread · {sp.iloc[-1]:.0f} bp"
+                      + (f" ({z.verdict_width}, {z.window_label})" if z else ""),
+                yaxis=dict(title="bp"))
+            ui.chart(fig, height=280, legend=False)
+            st.markdown(
+                f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
+                "90-day A2/P2 minus AA non-financial commercial paper. Front-end "
+                "credit stress; it has historically moved ahead of HY.</div>",
+                unsafe_allow_html=True)
+
+
+def _auctions(auctions) -> None:
+    """Coupon auction demand, each result judged against its own recent history."""
+    ui.section("Treasury auctions",
+               "coupon auction demand vs each security's own last six — the 'who is absorbing duration' read")
+    if not auctions.ok:
+        return
+    f = treasurydirect.with_context(auctions.frame)
+    recent = f.tail(12).iloc[::-1]
+
+    def _cell(v, dp=2, good_up=True, suffix=""):
+        if v != v:
+            return "<td style='text-align:right'>—</td>"
+        c = theme.delta_color(v, mode="perf" if good_up else "risk")
+        return (f"<td style='text-align:right;color:{c}'>{v:+.{dp}f}{suffix}</td>")
+
+    rows = "".join(
+        f"<tr><td>{r.Index:%d %b}</td><td>{ui.esc(r.term)} {ui.esc(r.type)}"
+        f"{' (r)' if r.reopening else ''}</td>"
+        f"<td style='text-align:right'>{ui.fmt(r.high_yield, 3)}</td>"
+        f"<td style='text-align:right'>{ui.fmt(r.btc, 2)}</td>"
+        + _cell(r.btc_vs_avg, 2)
+        + f"<td style='text-align:right'>{ui.fmt(r.indirect_pct, 1)}%</td>"
+        + _cell(r.indirect_pct_vs_avg, 1, suffix="pp")
+        + f"<td style='text-align:right'>{ui.fmt(r.dealer_pct, 1)}%</td>"
+        + _cell(r.dealer_pct_vs_avg, 1, good_up=False, suffix="pp")
+        + "</tr>"
+        for r in recent.itertuples())
+    c1, c2 = st.columns([1.35, 1])
+    with c1:
+        st.markdown(
+            '<table class="ficc-tbl"><tr><th>Date</th><th style="text-align:left">Security</th>'
+            '<th>High yld</th><th>B/C</th><th>vs avg</th><th>Indirect</th><th>vs avg</th>'
+            f'<th>Dealer</th><th>vs avg</th></tr>{rows}</table>',
+            unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:6px'>"
+            "Shares are of the competitive award. 'vs avg' compares with the same "
+            "security's previous six auctions; green is stronger demand. No tail is "
+            "shown: it needs the 1pm when-issued yield, which is not public.</div>",
+            unsafe_allow_html=True)
+    with c2:
+        fig = go.Figure()
+        for term, color in zip(("2-Year", "10-Year", "30-Year"),
+                               (theme.BLUE, theme.ORANGE, theme.AQUA)):
+            d = f[(f["term"].str.startswith(term)) & (f["type"] != "TIPS")].tail(24)
+            if len(d):
+                fig.add_trace(go.Scatter(
+                    x=d.index, y=d["dealer_pct"], name=term.replace("-Year", "y"),
+                    mode="lines+markers", line=dict(width=2, color=color),
+                    marker=dict(size=6),
+                    hovertemplate="%{x|%d %b %Y}: %{y:.1f}%<extra>"
+                                  f"{term}</extra>"))
+        if fig.data:
+            fig.update_layout(title="Primary dealer take-down — share of competitive award",
+                              yaxis=dict(title="%", ticksuffix="%"))
+            ui.chart(fig, height=300, unified=False)

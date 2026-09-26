@@ -44,6 +44,10 @@ _PROFILES: dict[str, tuple[dict[str, str], float]] = {
     "nyfed": ({"Accept": "application/json"}, 0.2),
     "mof": ({"User-Agent": CHROME_UA, "Accept": "text/csv,*/*"}, 0.5),
     "cftc": ({"User-Agent": CHROME_UA}, 1.0),
+    # ECB Data Portal (SDMX REST) and TreasuryDirect are plain public APIs;
+    # neither needs a browser disguise, but both are asked to be spared bursts.
+    "ecb": ({"Accept": "text/csv,*/*"}, 0.5),
+    "treasurydirect": ({"User-Agent": CHROME_UA, "Accept": "application/json"}, 0.5),
     "default": ({"User-Agent": CHROME_UA}, 0.25),
 }
 
@@ -75,14 +79,39 @@ def session(source: str) -> requests.Session:
         return _sessions[source]
 
 
-def get(source: str, url: str, *, timeout: int = 25, **kw) -> requests.Response:
-    """GET with the right headers and polite spacing for `source`."""
+# Transient failures worth one more try. A 4xx other than 429 is a real
+# answer (bad series id, moved endpoint) and retrying it only adds load.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _wait_turn(source: str) -> None:
     gap = _profile(source)[1]
     with _lock:
         wait = gap - (time.monotonic() - _last_call.get(source, 0.0))
         if wait > 0:
             time.sleep(wait)
         _last_call[source] = time.monotonic()
-    r = session(source).get(url, timeout=timeout, **kw)
-    r.raise_for_status()
-    return r
+
+
+def get(source: str, url: str, *, timeout: int = 25, retries: int = 1,
+        backoff: float = 2.0, **kw) -> requests.Response:
+    """GET with the right headers, polite spacing, and one retry on transients.
+
+    The retry is deliberately small: the on-disk cache already serves the last
+    good payload when a source is down, so hammering a struggling endpoint buys
+    nothing. One backed-off retry absorbs the common blip (a dropped
+    connection, a 503 during a publish) without turning an outage into a storm.
+    """
+    for attempt in range(retries + 1):
+        _wait_turn(source)
+        try:
+            r = session(source).get(url, timeout=timeout, **kw)
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt >= retries:
+                raise
+        else:
+            if r.status_code not in _RETRY_STATUS or attempt >= retries:
+                r.raise_for_status()
+                return r
+        time.sleep(backoff * (attempt + 1))
+    raise RuntimeError("unreachable")  # pragma: no cover

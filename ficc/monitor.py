@@ -18,7 +18,7 @@ reads consistently down the whole column.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -28,7 +28,21 @@ from . import theme
 from .ui import esc
 from .contract import Series
 
-LOOKBACKS = (("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63))
+# Lookbacks are calendar offsets, not observation counts. Counting rows
+# assumes every series prints every business day, and in this table several
+# do not: NFCI is weekly (five rows back is five *weeks*), and the cross-market
+# spreads are forward-filled across the union of two holiday calendars. A
+# calendar offset means the same thing on every row.
+LOOKBACKS: tuple[tuple[str, pd.DateOffset | None], ...] = (
+    ("1D", None),
+    ("1W", pd.DateOffset(weeks=1)),
+    ("1M", pd.DateOffset(months=1)),
+    ("3M", pd.DateOffset(months=3)),
+)
+# "1D" is the previous print, but only if it is recent enough to be a daily
+# move. A weekly series' previous print is a week old -- showing that under
+# "1D" would be exactly the mislabelling the calendar offsets fix.
+MAX_1D_GAP_DAYS = 4
 
 
 @dataclass(slots=True)
@@ -41,7 +55,6 @@ class Row:
     mode: str = "rates"                 # rates | risk | perf
     chg_unit: str = "bp"                # bp | % | pts
     as_of: object | None = None
-    note: str = ""
     scale: float = 1.0                  # multiply level for display (e.g. %→bp)
     chg_dp: int | None = None           # override decimals on change columns
 
@@ -49,7 +62,7 @@ class Row:
 def row_from(s: Series | None, label: str, *, mode: str = "rates",
              unit: str = "%", dp: int = 2, chg_unit: str = "bp",
              col: str | None = None, scale: float = 1.0,
-             transform=None) -> Row | None:
+             transform=None, chg_dp: int | None = None) -> Row | None:
     """Build a Row straight off a fetched Series, preserving its as_of."""
     if s is None or not s.ok:
         return None
@@ -61,14 +74,27 @@ def row_from(s: Series | None, label: str, *, mode: str = "rates",
         return None
     return Row(label=label, series=ser, value=float(ser.iloc[-1]) * scale,
                unit=unit, dp=dp, mode=mode, chg_unit=chg_unit, as_of=s.as_of,
-               scale=scale)
+               scale=scale, chg_dp=chg_dp)
 
 
-def _change(ser: pd.Series, periods: int, chg_unit: str) -> float | None:
+def _change(ser: pd.Series, lookback: pd.DateOffset | None,
+            chg_unit: str) -> float | None:
     ser = ser.dropna()
-    if len(ser) <= periods:
+    if len(ser) < 2:
         return None
-    now, then = float(ser.iloc[-1]), float(ser.iloc[-1 - periods])
+    now = float(ser.iloc[-1])
+    if lookback is None:
+        gap = (ser.index[-1] - ser.index[-2]).days
+        if gap > MAX_1D_GAP_DAYS:
+            return None
+        then = float(ser.iloc[-2])
+    else:
+        target = ser.index[-1] - lookback
+        if ser.index[0] > target:
+            return None                      # not enough history
+        then = an.value_at_or_before(ser, target)
+        if then is None:
+            return None
     if chg_unit == "bp":
         return (now - then) * 100.0
     if chg_unit == "%":
@@ -80,11 +106,18 @@ def _fmt(v: float | None, dp: int) -> str:
     return "—" if v is None or v != v else f"{v:,.{dp}f}"
 
 
+def _chg_dp(v: float, chg_unit: str, dp: int | None) -> int:
+    if dp is not None:
+        return dp
+    return 0 if chg_unit == "bp" else (2 if abs(v) < 10 else 1)
+
+
 def _fmt_chg(v: float | None, chg_unit: str, dp: int | None = None) -> str:
     if v is None or v != v:
         return "—"
-    if dp is None:
-        dp = 0 if chg_unit == "bp" else (2 if abs(v) < 10 else 1)
+    dp = _chg_dp(v, chg_unit, dp)
+    if round(v, dp) == 0:
+        return "0"          # not "+0" / "-0": a sign on nothing is noise
     return f"{v:+,.{dp}f}"
 
 
@@ -97,12 +130,12 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
     head = (
         '<tr class="mon-head">'
         '<th class="mon-name">Instrument</th><th>Last</th>'
-        '<th class="mon-spk">3y</th>'
+        f'<th class="mon-spk">{spark_years:g}y</th>'
         + "".join(f"<th>{n}</th>" for n, _ in LOOKBACKS)
-        + '<th class="mon-rng">Range in own history</th>'
+        + f'<th class="mon-rng">Position in {spark_years:g}y range</th>'
         '<th class="mon-as">As of</th></tr>'
     )
-    ncols = 8 + len(LOOKBACKS)
+    ncols = 5 + len(LOOKBACKS)
     body: list[str] = []
     for gname, rows in groups:
         live = [r for r in rows if r is not None]
@@ -112,17 +145,24 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
             f'<tr class="mon-grp"><td colspan="{ncols}">{esc(gname)}</td></tr>')
         for r in live:
             ser = r.series
+            # The spark column is headed "3y", so draw 3y -- not the full
+            # history, which for the JGB rows runs back to 1974.
+            spk = (ser[ser.index >= ser.index[-1] - pd.DateOffset(days=int(365.25 * spark_years))]
+                   if ser is not None and len(ser) else ser)
             z = an.zscore(ser, spark_years) if ser is not None else None
             pct = z.pct if z else None
 
             cells = [f'<td class="mon-name">{esc(r.label)}</td>',
                      f'<td class="mon-val">{_fmt(r.value, r.dp)}'
                      f'<span class="mon-unit">{r.unit}</span></td>',
-                     f'<td class="mon-spk">{sp.spark(ser)}</td>']
-            for _, per in LOOKBACKS:
-                c = _change(ser, per, r.chg_unit) if ser is not None else None
+                     f'<td class="mon-spk">{sp.spark(spk)}</td>']
+            for _, lb in LOOKBACKS:
+                c = _change(ser, lb, r.chg_unit) if ser is not None else None
                 # Direction only -- see the module docstring.
-                color = theme.delta_color(c, mode="rates")
+                # A change that displays as 0 takes no colour either.
+                shown = (None if c is None or c != c
+                         or round(c, _chg_dp(c, r.chg_unit, r.chg_dp)) == 0 else c)
+                color = theme.delta_color(shown, mode="rates")
                 cells.append(f'<td class="mon-chg" style="color:{color}">'
                              f'{_fmt_chg(c, r.chg_unit, r.chg_dp)}</td>')
 

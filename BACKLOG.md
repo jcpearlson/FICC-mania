@@ -1,6 +1,6 @@
 # Backlog & data-source status
 
-Verified 2026-08-21. This file exists so that "we don't show X" is always a
+Verified 2026-08-21; updated by the 2026-09-26 audit (see `AUDIT.md`). This file exists so that "we don't show X" is always a
 recorded decision with a reason, not an oversight.
 
 ---
@@ -35,7 +35,7 @@ recorded decision with a reason, not an oversight.
 
 Ranked. All endpoints confirmed returning data on 2026-08-21.
 
-1. **Treasury auction results** — `https://www.treasurydirect.gov/TA_WS/securities/auctioned?format=json`
+1. ✅ *Wired in (2026-09-26, `sources/treasurydirect.py`; not yet verified live).* **Treasury auction results** — `https://www.treasurydirect.gov/TA_WS/securities/auctioned?format=json`
    (200, 894 KB, 250 records). Gives `bidToCoverRatio`, `indirectBidderAccepted`,
    `primaryDealerAccepted`. The missing "who is absorbing duration" read.
    Latest 29Y6M TIPS: b/c 2.82, 74.3% indirect.
@@ -51,13 +51,13 @@ Ranked. All endpoints confirmed returning data on 2026-08-21.
 4. **EDGAR full-text search** — `https://efts.sec.gov/LATEST/search-index?q=...&forms=...`
    with a UA header. Free daily distress velocity: `"chapter 11"` in 8-Ks over
    Jun 1–Aug 20 = 228; `"going concern"` in 10-Qs = 3,393.
-5. **CFTC Commitments of Traders** — Socrata, no key. `yw9f-hn96` (TFF, use for
+5. ✅ *Wired in for JPY/EUR (2026-09-26, `sources/cftc.py`; not yet verified live — confirm field names on `yw9f-hn96`).* **CFTC Commitments of Traders** — Socrata, no key. `yw9f-hn96` (TFF, use for
    FX), `72hh-3qpy` (disaggregated, use for commodities). **Default limit is
    1000 — always set `$limit`.** Contract-name literals must match exactly, e.g.
    `COPPER- #1 - COMMODITY EXCHANGE INC.` (no space before the hyphen). Beware
    lookalikes (`MICRO GOLD`, Coinbase gold) that corrupt a series on loose
    matching. Normalise net spec by open interest before z-scoring.
-6. **A2/P2 − AA commercial paper spread** — FRED `RIFSPPNA2P2D90NB` − `DCPN3M`
+6. ✅ *Wired in (rates tab + monitor).* **A2/P2 − AA commercial paper spread** — FRED `RIFSPPNA2P2D90NB` − `DCPN3M`
    (≈28bp). Front-end credit stress; leads HY. Align the dates — they publish a
    day apart.
 7. **Realised default reads** — FRED `DRBLACBS` (1.34%), `CORBLACBS` (0.59%).
@@ -68,8 +68,19 @@ Ranked. All endpoints confirmed returning data on 2026-08-21.
    Build on the keyless `dnav` files; offer the key as opt-in only.
 9. **Bill curve** — `type=daily_treasury_bill_rates` (200). `treasury.BILL` is
    already defined; nothing between overnight SOFR and the 1y CMT point today.
-10. **Repo operations** — NY Fed `api/rp/all/all/results/last/N.json` (200,
+10. *(Partly: ON RRP take-up now comes from FRED `RRPONTSYD`; SRF usage still open.)* **Repo operations** — NY Fed `api/rp/all/all/results/last/N.json` (200,
     returns SRF and RRP). SOFR−IORB is already shown as the scarcity gauge.
+
+11. ✅ *Wired in (2026-09-26, `sources/ecb.py`; not yet verified live).* **ECB Data
+    Portal** — keyless SDMX CSV: `YC/B.U2.EUR.4F.G_N_A.SV_C_YM.SR_<tenor>`
+    (euro AAA spot curve) and `EST/B.EU000A2X2A25.WT` (EUR STR).
+12. **Treasury Fiscal Data API** — `api.fiscaldata.treasury.gov`, keyless. Daily
+    TGA from the Daily Treasury Statement would replace weekly `WTREGEN` in
+    the net-liquidity chart.
+13. **Bank of Canada Valet** (`bankofcanada.ca/valet`, keyless JSON) — CAD curve
+    for the Global block.
+14. **CFTC 10y note leveraged-fund net** — code `043602` is already in
+    `cftc.CONTRACTS`; the basis-trade read belongs on the rates tab.
 
 ## 4. Known limitations in what is shipped
 
@@ -77,14 +88,18 @@ Ranked. All endpoints confirmed returning data on 2026-08-21.
   exceeds the true forward by roughly `½σ²T₁T₂`. Material beyond ~2y and
   **not adjusted for**. The strip is plotted at reference-quarter midpoints,
   which fixes the placement error but not the convexity bias.
-- **No volume/open-interest screen** on the futures strips, so a stale far
-  contract print flows straight into the headline "bp priced by" figure.
+- **Volume screen only, no open interest** on the futures strips. Contracts are
+  screened on 10-day average volume and the strip is truncated at the first
+  illiquid contract; Yahoo does not serve open interest.
 - **ICE BofA history is capped at 3 years** by FRED's keyless endpoint. Window
   labels self-report, so nothing lies, but the credit percentile context is
   a compressed post-2021 sample that makes historically tight spreads look
   mid-range. A free FRED API key would restore full history (untested).
   `BAA10Y` (1986+, unrestricted) is the long-run anchor if needed.
-- **Unused analytics.** `analytics.butterfly()` and `analytics.forward_rate()`
-  are implemented and not yet surfaced — no 5s30s, no 2s5s10s fly. Note that
-  `forward_rate()` expects **zero** rates; feeding it CMT par yields is
-  silently wrong.
+- **Unused analytics.** `analytics.forward_rate()` is implemented and not
+  surfaced. It expects **zero** rates; feeding it CMT par yields is silently
+  wrong. (`butterfly()` now drives the 2s5s10s monitor row.)
+- **EUR curve is spot, UST/JGB are par.** The difference is a few bp and is
+  captioned, but the 10y UST−EUR spread is not a strict like-for-like.
+- **Net liquidity** is a market shorthand (WALCL − TGA − RRP), not an
+  identity; it is labelled so on the chart.

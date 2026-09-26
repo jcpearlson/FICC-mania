@@ -13,7 +13,6 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .contract import Series
 
 BP = 100.0  # percent -> basis points
 
@@ -177,6 +176,18 @@ def residual_now(y: pd.Series, x: pd.Series, window_days: int = 252) -> float:
     return float(last["y"] - (slope * last["x"] + intercept))
 
 
+def rolling_beta(y: pd.Series, x: pd.Series, window: int = 250) -> pd.Series:
+    """Trailing OLS slope of y on x, vectorised: cov(x, y) / var(x).
+
+    Identical to refitting `beta()` at every date, without a Python loop of
+    several hundred `polyfit` calls per render.
+    """
+    df = pd.concat([pd.Series(y).rename("y"), pd.Series(x).rename("x")], axis=1).dropna()
+    cov = df["y"].rolling(window).cov(df["x"])
+    var = df["x"].rolling(window).var()
+    return (cov / var.where(var > 0)).rename("beta")
+
+
 def realised_vol(s: pd.Series, window: int = 21, annualise: int = 252) -> pd.Series:
     r = pd.Series(s).dropna().pct_change()
     return (r.rolling(window).std() * np.sqrt(annualise) * 100).dropna()
@@ -185,6 +196,22 @@ def realised_vol(s: pd.Series, window: int = 21, annualise: int = 252) -> pd.Ser
 def drawdown(s: pd.Series) -> pd.Series:
     s = pd.Series(s).dropna()
     return (s / s.cummax() - 1.0) * 100
+
+
+def pct_return(s: pd.Series, periods: int = 1) -> float | None:
+    """Percentage change over N observations, measured against the *earlier* value."""
+    s = pd.Series(s).dropna()
+    if len(s) <= periods:
+        return None
+    then = float(s.iloc[-1 - periods])
+    return (float(s.iloc[-1]) / then - 1.0) * 100.0 if then else None
+
+
+def value_at_or_before(s: pd.Series, when: pd.Timestamp) -> float | None:
+    """Last observation on or before `when` -- for calendar-based lookbacks."""
+    s = pd.Series(s).dropna()
+    s = s[s.index <= when]
+    return float(s.iloc[-1]) if len(s) else None
 
 
 def pct_change_bp(s: pd.Series, periods: int) -> float | None:
@@ -346,9 +373,44 @@ def implied_default_rate(oas_pct: float, recovery: float = 0.40) -> float:
     return oas_pct / (1.0 - recovery)
 
 
-def excess_over_expected_loss(oas_pct: float, realised_default_pct: float,
-                              recovery: float = 0.40) -> float:
-    """OAS minus expected loss -- the actual credit risk premium, in percent."""
-    if oas_pct != oas_pct or realised_default_pct != realised_default_pct:
+def excess_over_loss(oas_pct: float, loss_rate_pct: float) -> float:
+    """OAS minus the realised annual *loss* rate -- the credit risk premium.
+
+    Takes a loss rate, not a default rate. A charge-off rate is already net of
+    recovery (it is the loss), so multiplying it by (1 - R) again -- as if it
+    were a default rate -- understates expected loss by 40% and overstates the
+    premium. Convert a genuine default rate with `default_pct * (1 - R)`
+    before calling this.
+    """
+    if oas_pct != oas_pct or loss_rate_pct != loss_rate_pct:
         return float("nan")
-    return oas_pct - realised_default_pct * (1.0 - recovery)
+    return oas_pct - loss_rate_pct
+
+
+def loss_to_default_rate(loss_pct: float | pd.Series, recovery: float = 0.40):
+    """Default rate implied by a loss rate at the given recovery: L / (1 - R).
+
+    Puts a charge-off series on the same footing as `implied_default_rate`,
+    so the two can share an axis honestly.
+    """
+    return loss_pct / (1.0 - recovery)
+
+
+def net_liquidity(walcl_mn: pd.Series, tga_bn: pd.Series, rrp_bn: pd.Series) -> pd.Series:
+    """Fed balance sheet minus TGA minus ON RRP, in $ trillions.
+
+    The market's shorthand for how much central-bank liquidity is actually in
+    the private system. Units differ at source -- WALCL is in $ millions,
+    WTREGEN and RRPONTSYD in $ billions -- which is exactly the kind of thing
+    that silently produces a 1000x error, so the conversion lives here once.
+
+    Evaluated on the balance-sheet dates (weekly, Wednesday); the daily RRP is
+    taken as its last value on or before each date.
+    """
+    w = pd.Series(walcl_mn).dropna() / 1e6
+    parts = pd.concat([w.rename("w"),
+                       (pd.Series(tga_bn) / 1e3).rename("t"),
+                       (pd.Series(rrp_bn) / 1e3).rename("r")], axis=1).sort_index()
+    parts[["t", "r"]] = parts[["t", "r"]].ffill()
+    parts = parts.loc[parts.index.isin(w.index)].dropna()
+    return (parts["w"] - parts["t"] - parts["r"]).rename("net_liquidity")

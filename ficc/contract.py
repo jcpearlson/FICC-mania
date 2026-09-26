@@ -116,6 +116,27 @@ class Series:
         return self
 
 
+def status_from(meta: object) -> Status:
+    """Map a `cache.through` meta string onto a Status.
+
+    "live" is a fresh network pull, "cached" a within-TTL disk hit, and
+    "stale:<age>" the last good payload served because the source failed.
+    """
+    m = str(meta)
+    if m.startswith("stale"):
+        return Status.STALE
+    return Status.CACHED if m == "cached" else Status.OK
+
+
+def worst_status(metas: list[object]) -> Status:
+    """One status for a series stitched from several cached pulls."""
+    order = (Status.OK, Status.CACHED, Status.STALE)
+    return max((status_from(m) for m in metas), key=order.index, default=Status.OK)
+
+
+STALE_NOTE = "served from cache (source unreachable)"
+
+
 def failed(key: str, label: str, source: str, err: Any) -> Series:
     """An empty Series carrying the error, so one dead fetcher never blanks a page."""
     return Series(

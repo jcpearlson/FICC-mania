@@ -14,7 +14,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .. import cache, http
-from ..contract import Series, Status, failed
+from ..contract import Series, failed, status_from
 
 API = "https://markets.newyorkfed.org/api"
 
@@ -43,7 +43,7 @@ def reference_rate(rate: str = "sofr", kind: str = "secured", n: int = 750) -> S
         return failed(rate, rate.upper(), "NY Fed", e)
     return Series(
         key=rate, label=rate.upper(), frame=frame, source="NY Fed markets API",
-        status=Status.STALE if str(meta).startswith("stale") else Status.OK,
+        status=status_from(meta),
         unit="%", cadence_days=1,
     )
 
@@ -64,7 +64,7 @@ def sofr_averages(n: int = 750) -> Series:
     return Series(
         key="sofrai", label="SOFR compounded averages", frame=frame,
         source="NY Fed markets API",
-        status=Status.STALE if str(meta).startswith("stale") else Status.OK,
+        status=status_from(meta),
         unit="%", cadence_days=1,
         note="Backward-looking compounded averages, not forward rates.",
     )

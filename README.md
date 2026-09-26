@@ -28,10 +28,13 @@ binds to `localhost` only — it has no authentication, so read
 **Dashboard** — the landing page, and the only one you need for a quick glance.
 Terminal density, built for a **portrait monitor**.
 
-It leads with a **monitor table**: ~31 instruments grouped Treasuries → curve
+It leads with a **monitor table**: ~38 instruments grouped Treasuries → curve
 slopes → credit → front end and funding → inflation and term premium → vol →
-Japan and FX, each row carrying level, 1D/1W/1M/3M change, a position-in-range marker, its
-percentile, a 3-year sparkline and the source's observation date. That is a
+Global (Japan, euro area, FX), each row carrying level, 1D/1W/1M/3M change, a
+position-in-3y-range marker, its percentile, a 3-year sparkline and the
+source's observation date. Changes are **calendar** lookbacks (1W is seven days
+back, whatever the series' cadence), and 1D is blank for series that do not
+print daily. That is a
 deliberate trade: six stat tiles occupy the same vertical space as thirty table
 rows and carry a fifth of the information, and on a glance page the number of
 instruments visible before you scroll *is* the product.
@@ -67,6 +70,11 @@ heatmap, the Fed policy path implied by fed funds futures, overnight funding
 (SOFR vs EFFR with its percentile band), the 10y UST−JGB spread, a decomposition
 of the 10y into real yield / breakevens / term premium, reserve scarcity via
 SOFR−IORB, and **carry, roll-down and the breakeven selloff** for every tenor.
+The curve chart also carries the ECB's euro AAA curve and a month-ago UST
+ghost. Below: **liquidity and plumbing** (Fed balance sheet net of TGA and RRP,
+reserves, the A2/P2−AA commercial paper spread) and **Treasury auction
+demand** (bid-to-cover and bidder shares against each security's own recent
+auctions).
 
 **Credit, CLOs & loans** — IG, HY, EM and Euro HY option-adjusted spreads with
 percentile context; the full AAA→CCC ratings ladder; the CCC−BB quality spread
@@ -77,10 +85,14 @@ implies versus what is actually defaulting.
 **FX & commodities** — the dollar and the G10/EM complex; USDJPY against its
 rate-implied fair value with the residual *and the rolling beta*; gold against
 real yields; copper/gold against 10y yields; energy forward curves with a
-contango/backwardation metric; gold/silver; and a commodity performance grid.
+contango/backwardation metric; gold/silver; a commodity performance grid; and
+**CFTC positioning**, i.e. leveraged-fund net in yen and euro futures as a share of
+open interest.
 
-**Sources** — every endpoint, its cadence, and an explicit list of what is
-deliberately absent and why.
+**Sources** — every endpoint, its cadence, an explicit list of what is
+deliberately absent and why, and a **data-quality table** that checks every
+loaded series for staleness, flatlines (dead symbols), outsized jumps (bad
+prints or unit changes), history gaps and short samples.
 
 ---
 
@@ -115,8 +127,9 @@ visible rather than hidden.
 
 One dead source never blanks the page. Every fetch is cache-through with a
 stale fallback: if the network call fails and a cached payload exists, the last
-known value is served and badged as stale. Panels render whatever succeeded and
-list what did not at the bottom.
+known value is served and badged as stale. An HTTP 200 with no usable rows is
+treated as a failure too, so it never overwrites a good cache entry. Panels
+render whatever succeeded and list what did not at the bottom.
 
 ---
 
@@ -131,7 +144,9 @@ ficc/
   contract.py           Series record: as_of vs fetched_at, status, freshness
   http.py               Per-source headers + rate limiting  (see note below)
   cache.py              On-disk TTL cache with stale fallback
-  analytics.py          Z-scores, curve maths, carry/roll-down, regime scoring
+  analytics.py          Z-scores, curve maths, carry/roll-down, rolling beta,
+                        net liquidity, regime scoring
+  quality.py            Per-series data-quality checks (Sources tab)
   theme.py              Design tokens, Plotly template, compact chart mode
   ui.py                 Stat tiles, freshness badges, section chrome, status strip
   monitor.py            The dense monitor table (rows, grouping, one colour rule)
@@ -141,11 +156,28 @@ ficc/
     treasury.py         home.treasury.gov nominal / real / bill curves
     nyfed.py            NY Fed markets API (SOFR, EFFR, averages)
     mof.py              MOF Japan JGB curve (English CSV, history to 1974)
+    ecb.py              ECB Data Portal: euro AAA curve, EUR STR
+    treasurydirect.py   Treasury coupon auction results
+    cftc.py             CFTC Traders in Financial Futures positioning
     market.py           yfinance: FX, commodities, ETFs, futures strips
   panels/
     dashboard.py        The portrait glance page (landing tab)
     overview.py  rates.py  credit.py  fxcommods.py
+tests/
+  fakenet.py            Every source's wire format, synthesised: the whole
+                        app runs and renders offline
 ```
+
+### Tests
+
+```bash
+uv run --group dev pytest      # 31 tests, no network needed
+uv run --group dev ruff check .
+```
+
+`tests/fakenet.py` replaces `http.get` and `yfinance.download` with
+deterministic synthetic payloads shaped like each real source, so the parsers,
+analytics and every tab's render path run in CI without touching an endpoint.
 
 ### Colour conventions
 
@@ -194,14 +226,17 @@ pasted headers usually carry session cookies.
 | Source | Provides | Freshness |
 |---|---|---|
 | US Treasury | UST nominal, real and bill curves | Same day, ~15:30 ET |
-| FRED (keyless CSV) | ICE BofA OAS, breakevens, term premium, NFCI, IORB | T+1 daily |
+| FRED (keyless CSV) | ICE BofA OAS, breakevens, term premium, NFCI, IORB, Fed balance sheet / TGA / RRP / reserves, CP rates | T+1 daily; balance sheet weekly |
 | NY Fed markets API | SOFR + percentiles + volume, EFFR, SOFR averages | ~08:00 ET, T+1 |
 | MOF Japan | JGB curve 1Y–40Y, history to 1974 | T+1 |
 | CME futures (via yfinance) | Forward SOFR (SR3), policy path (ZQ), commodity curves | Intraday, 15-min delayed |
 | Yahoo Finance | FX, metals, energy, ags, credit/CLO ETFs, VIX/MOVE/SKEW | Intraday, 15-min delayed |
+| ECB Data Portal | Euro-area AAA govt spot curve, EUR STR | T+1 |
+| TreasuryDirect | Coupon auction results | Same day as auction |
+| CFTC (Socrata) | Traders in Financial Futures positioning | Weekly (Fri, for Tue) |
 
 See `BACKLOG.md` for what is blocked, what is licensed, and what is deliberately
-left out.
+left out, and `AUDIT.md` for the most recent source and data-quality audit.
 
 ## Data terms — read before you fork or redistribute
 
@@ -216,7 +251,8 @@ redistributable — and it is your responsibility to keep it that way.
 
 | Source | Status | What it means for you |
 |---|---|---|
-| US Treasury, Federal Reserve (FRED host), NY Fed, MOF Japan | US/Japanese government publications, generally free to use | Attribute the source; do not imply endorsement |
+| US Treasury, TreasuryDirect, Federal Reserve (FRED host), NY Fed, CFTC, MOF Japan | US/Japanese government publications, generally free to use | Attribute the source; do not imply endorsement |
+| ECB Data Portal | ECB statistics; free reuse provided the source is cited | Cite "Source: ECB" wherever the euro curve or EUR STR is shown or reused |
 | **ICE BofA index data via FRED** (`BAML*` series) | **Third-party licensed content**, owned by ICE Data Indices, LLC and redistributed by FRED under its own terms | Personal/research use as served by FRED. **Do not redistribute these series, cache them publicly, or build a commercial product on them** without checking ICE's and FRED's terms |
 | **Yahoo Finance via `yfinance`** | **Unofficial.** `yfinance` reads a public web endpoint that Yahoo does not document or support for this purpose, and Yahoo's Terms of Service restrict automated access and redistribution | Personal use at your own risk. It can break or start refusing requests at any time. **Do not build a commercial or redistributed service on it** |
 

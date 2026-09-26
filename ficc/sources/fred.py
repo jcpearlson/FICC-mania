@@ -16,7 +16,7 @@ import io
 import pandas as pd
 
 from .. import cache, http
-from ..contract import Series, Status, failed
+from ..contract import STALE_NOTE, Series, Status, failed, status_from
 
 BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
@@ -49,10 +49,13 @@ def get(
         return failed(series_id, label or series_id, "FRED", e)
     if start:
         frame = frame[frame.index >= pd.Timestamp(start)]
-    status = Status.OK if meta == "live" else Status.CACHED
-    note = "served from cache (source unreachable)" if str(meta).startswith("stale") else ""
-    if str(meta).startswith("stale"):
-        status = Status.STALE
+    # Administered rates (IORB, the policy-rate bounds) are published with a
+    # forward effective date the day an FOMC decision is announced. Left in,
+    # that row becomes "latest" -- a table would show tomorrow's rate as
+    # today's print and date it in the future. Keep only what has happened.
+    frame = frame[frame.index <= pd.Timestamp.today().normalize()]
+    status = status_from(meta)
+    note = STALE_NOTE if status is Status.STALE else ""
     return Series(
         key=series_id,
         label=label or series_id,
