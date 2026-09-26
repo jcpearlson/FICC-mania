@@ -110,11 +110,10 @@ def render() -> None:
     with c2:
         # Ratings ladder: today vs 3m ago vs 1y ago. Log scale because CCC is
         # an order of magnitude above AAA and a linear axis flattens the rest.
-        rows, ok = [], True
+        rows = []
         for sid, label in LADDER.items():
             s = ladder[sid]
             if not s.ok:
-                ok = False
                 continue
             d = s.col.dropna()
             rows.append({"rating": label, "now": float(d.iloc[-1]) * 100,
@@ -258,34 +257,43 @@ def _risk_premium(head, yields, defaults) -> None:
     c1, c2 = st.columns(2)
 
     with c1:
-        hy, ig = head.get("BAMLH0A0HYM2"), head.get("BAMLC0A0CM")
+        hy = head.get("BAMLH0A0HYM2")
         chg = defaults.get("CORBLACBS")
         fig = go.Figure()
+        start = None
         if hy and hy.ok:
             pd_hy = hy.col.apply(an.implied_default_rate)
+            start = pd_hy.index[0]
             fig.add_trace(go.Scatter(x=pd_hy.index, y=pd_hy, name="HY implied default rate",
                                      line=dict(width=2, color=theme.ORANGE),
                                      hovertemplate="%{y:.2f}%<extra>implied</extra>"))
         if chg and chg.ok:
-            d = chg.col
-            d = d[d.index >= (pd_hy.index[0] if hy and hy.ok else d.index[0])]
-            fig.add_trace(go.Scatter(x=d.index, y=d, name="Realised charge-off rate",
-                                     line=dict(width=2, color=theme.AQUA),
+            # A charge-off rate is a *loss* rate (net of recovery). Grossed up
+            # at the same 40% recovery it becomes a default-rate equivalent,
+            # which is the only way the two lines can share an axis honestly.
+            d = an.loss_to_default_rate(chg.col)
+            d = d[d.index >= start] if start is not None else d
+            fig.add_trace(go.Scatter(x=d.index, y=d, name="Bank C&I charge-offs, as default rate",
+                                     line=dict(width=2, color=theme.AQUA, shape="hv"),
                                      hovertemplate="%{y:.2f}%<extra>realised</extra>"))
-        fig.update_layout(title="HY implied default rate vs what actually defaults",
+        fig.update_layout(title="HY implied default rate vs realised losses (40% recovery)",
                           yaxis=dict(title="% per year", ticksuffix="%"))
         ui.chart(fig, height=280)
         if hy and hy.ok:
-            imp = an.implied_default_rate(hy.latest())
-            real_pd = chg.latest() if chg and chg.ok else float("nan")
-            xs = an.excess_over_expected_loss(hy.latest(), real_pd)
+            oas = hy.latest()
+            imp = an.implied_default_rate(oas)
+            loss = chg.latest() if chg and chg.ok else float("nan")
+            xs = an.excess_over_loss(oas, loss)
             st.markdown(
                 f"<div style='font-size:11.5px;color:{theme.INK_2};margin-top:-4px'>"
-                f"At 40% recovery, {hy.latest() * 100:.0f}bp implies a "
+                f"At 40% recovery, {oas * 100:.0f}bp implies a "
                 f"<b style='color:{theme.INK}'>{imp:.2f}%</b> annual default rate. "
-                + (f"Charge-offs are running {real_pd:.2f}%, leaving roughly "
-                   f"<b style='color:{theme.INK}'>{xs * 100:.0f}bp</b> of genuine risk "
-                   "premium." if real_pd == real_pd else "")
+                + (f"Bank C&amp;I charge-offs (a realised <em>loss</em> rate) are "
+                   f"running {loss:.2f}%, leaving roughly "
+                   f"<b style='color:{theme.INK}'>{xs * 100:.0f}bp</b> of spread over "
+                   "realised losses. Bank loans are senior and secured, so this is a "
+                   "loose proxy for HY losses and flatters the premium."
+                   if loss == loss else "")
                 + "</div>", unsafe_allow_html=True)
 
     with c2:

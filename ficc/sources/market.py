@@ -16,7 +16,7 @@ import warnings
 import pandas as pd
 
 from .. import cache
-from ..contract import Series, Status, failed
+from ..contract import Series, failed, status_from
 
 warnings.filterwarnings("ignore", module="yfinance")
 
@@ -73,7 +73,7 @@ def quote(symbol: str, label: str, *, unit: str = "", period: str = "1y",
     return Series(
         key=symbol, label=label, frame=out, source="Yahoo Finance",
         unit=unit, cadence_days=1,
-        status=Status.STALE if str(meta).startswith("stale") else Status.OK,
+        status=status_from(meta),
     )
 
 
@@ -90,7 +90,7 @@ def basket(spec: dict[str, str], period: str = "2y",
     except Exception as e:
         return {s: failed(s, lbl, "Yahoo Finance", e) for s, lbl in spec.items()}
     meta = frame.attrs.get("meta", "live")
-    status = Status.STALE if str(meta).startswith("stale") else Status.OK
+    status = status_from(meta)
     out: dict[str, Series] = {}
     for sym, label in spec.items():
         if sym in frame.columns and frame[sym].notna().any():
@@ -198,7 +198,7 @@ def futures_strip(root: str = "SR3", n: int = 12, quarterly: bool = True,
         key=root, label=label, frame=frame,
         source="Yahoo Finance (CME futures)", unit="%", cadence_days=1,
         as_of=pd.Timestamp.today().date(),
-        status=Status.STALE if str(meta).startswith("stale") else Status.OK,
+        status=status_from(meta),
         note="Implied rate = 100 - price; plotted at its reference-period midpoint.",
     )
 
@@ -248,7 +248,7 @@ def commodity_curve(root: str = "CL", n: int = 8, label: str = "") -> Series:
         key=root, label=label or root, frame=frame,
         source="Yahoo Finance (CME futures)", cadence_days=1,
         as_of=pd.Timestamp.today().date(),
-        status=Status.STALE if str(meta).startswith("stale") else Status.OK,
+        status=status_from(meta),
     )
 
 

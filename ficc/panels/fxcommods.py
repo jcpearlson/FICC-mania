@@ -18,7 +18,7 @@ import streamlit as st
 
 from .. import analytics as an
 from .. import theme, ui
-from ..sources import fred, market, mof
+from ..sources import cftc, fred, market, mof
 
 FX = {"DX-Y.NYB": "DXY", "JPY=X": "USDJPY", "EURUSD=X": "EURUSD",
       "GBPUSD=X": "GBPUSD", "AUDUSD=X": "AUDUSD", "CNH=X": "USDCNH",
@@ -46,6 +46,11 @@ def _load():
     return fx, metals, energy, ags, vols, wti_curve, ng_curve, real, ust10, jgb
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_cot():
+    return {code: cftc.positioning(code) for code in ("097741", "099741")}
+
+
 def render() -> None:
     fx, metals, energy, ags, vols, wti_curve, ng_curve, real, ust10, jgb = _load()
 
@@ -54,15 +59,12 @@ def render() -> None:
     for sym, dp in (("DX-Y.NYB", 2), ("JPY=X", 2)):
         s = fx.get(sym)
         if s and s.ok:
-            chg = s.change()
-            pct = (chg / s.latest() * 100) if chg and s.latest() else None
             tiles.append(ui.tile(FX[sym], s.latest(), s, dp=dp,
-                                 delta=pct, delta_unit="%"))
+                                 delta=an.pct_return(s.col), delta_unit="%"))
     for sym in ("GC=F", "HG=F"):
         s = metals.get(sym)
         if s and s.ok:
-            chg = s.change()
-            pct = (chg / s.latest() * 100) if chg and s.latest() else None
+            pct = an.pct_return(s.col)
             z = an.zscore(s.col, 3)
             tiles.append(ui.tile(METALS[sym], s.latest(), s, dp=2,
                                  delta=pct, delta_unit="%",
@@ -70,12 +72,10 @@ def render() -> None:
     w = energy.get("CL=F")
     if w and w.ok:
         shape = market.curve_shape(wti_curve.frame, 6) if wti_curve.ok else None
-        sub = (f"{shape:+.0f}% ann. "
-               f"{'backwardation' if shape and shape > 0 else 'contango'}") if shape else ""
-        chg = w.change()
+        sub = (f"{shape:+.0f}% ann. {'backwardation' if shape > 0 else 'contango'}"
+               if shape is not None and shape == shape else "")
         tiles.append(ui.tile("WTI", w.latest(), w, dp=2,
-                             delta=(chg / w.latest() * 100) if chg else None,
-                             delta_unit="%", sub=sub))
+                             delta=an.pct_return(w.col), delta_unit="%", sub=sub))
     ui.tile_row(tiles[:6])
 
     # ---- USDJPY vs rate differential -----------------------------------
@@ -95,15 +95,7 @@ def render() -> None:
         df["resid"] = df["spot"] - df["fair"]
 
         # Rolling beta: yen per 100bp of spread.
-        roll = []
-        for i in range(len(df)):
-            if i < 250:
-                roll.append(float("nan"))
-            else:
-                b, _, _ = an.beta(df["spot"].iloc[i - 250:i + 1],
-                                  df["diff"].iloc[i - 250:i + 1], 250)
-                roll.append(b * 100)
-        df["beta100"] = roll
+        df["beta100"] = an.rolling_beta(df["spot"], df["diff"], 250) * 100
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -142,6 +134,8 @@ def render() -> None:
                 "intervention, a BoJ shift, or flow dominance. That is a louder "
                 "warning than a large residual.</div>", unsafe_allow_html=True)
 
+    _positioning(_load_cot())
+
     # ---- FX complex -----------------------------------------------------
     c1, c2 = st.columns(2)
     with c1:
@@ -150,11 +144,18 @@ def render() -> None:
             s = fx.get(sym)
             if s and s.ok:
                 d = s.col.dropna().tail(504)
+                # EURUSD, GBPUSD and AUDUSD are quoted the other way round:
+                # invert them so every line on this chart rises when the
+                # dollar strengthens. Mixed quoting conventions on one indexed
+                # chart make half the lines read backwards.
+                if label.endswith("USD"):
+                    d = 1.0 / d
+                    label = f"{label} (inv.)"
                 fig.add_trace(go.Scatter(x=d.index, y=d / d.iloc[0] * 100, name=label,
                                          line=dict(width=2, color=color),
                                          hovertemplate="%{y:.1f}<extra>"
                                                        f"{label}</extra>"))
-        fig.update_layout(title="FX complex — indexed to 100 (up = USD stronger for USDJPY/CNH/MXN)",
+        fig.update_layout(title="FX complex — indexed to 100, up = USD stronger everywhere",
                           yaxis=dict(title="Index"))
         ui.chart(fig, height=300)
     with c2:
@@ -291,3 +292,49 @@ def render() -> None:
 
     ui.failures_note([*fx.values(), *metals.values(), *energy.values(), *vols.values()])
     ui.sources_note([*metals.values(), real, jgb])
+
+
+def _positioning(cot: dict) -> None:
+    """Leveraged-fund positioning in yen and euro futures, as a share of OI."""
+    live = {code: s for code, s in cot.items() if s.ok}
+    if not live:
+        ui.failures_note(list(cot.values()))
+        return
+    ui.section("Positioning — CFTC Traders in Financial Futures",
+               "leveraged-fund net as % of open interest; a crowded short yen is carry-unwind fuel")
+    c1, c2 = st.columns([1.4, 1])
+    with c1:
+        fig = go.Figure()
+        for s, color in zip(live.values(), (theme.BLUE, theme.ORANGE)):
+            d = s.frame["lev_net_pct_oi"].dropna()
+            fig.add_trace(go.Scatter(x=d.index, y=d, name=s.label.replace(" futures", ""),
+                                     line=dict(width=2, color=color, shape="hv"),
+                                     hovertemplate="%{y:+.1f}% of OI<extra>"
+                                                   f"{s.label}</extra>"))
+        fig.add_hline(y=0, line=dict(color=theme.AXIS, width=1))
+        fig.update_layout(title="Leveraged funds, net long (+) / short (−) the foreign currency",
+                          yaxis=dict(title="% of open interest", ticksuffix="%"))
+        ui.chart(fig, height=280)
+    with c2:
+        rows = []
+        for s in live.values():
+            d = s.frame["lev_net_pct_oi"].dropna()
+            z = an.zscore(d, 5)
+            wk = float(d.iloc[-1] - d.iloc[-2]) if len(d) > 1 else float("nan")
+            rows.append(
+                f"<tr><td>{ui.esc(s.label)}</td>"
+                f"<td style='text-align:right'>{ui.fmt(float(d.iloc[-1]), 1, plus=True)}%</td>"
+                f"<td style='text-align:right'>{ui.fmt(wk, 1, plus=True)}</td>"
+                f"<td style='text-align:right'>{f'{z.pct:.0f}' if z else '—'}</td>"
+                f"<td style='text-align:right'>{f'{s.as_of:%d %b}' if s.as_of else '—'}</td></tr>")
+        st.markdown(
+            '<table class="ficc-tbl"><tr><th>Contract</th><th>Lev net</th><th>1w chg</th>'
+            f'<th>Pctile</th><th>As of</th></tr>{"".join(rows)}</table>',
+            unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:6px'>"
+            "Positions as of Tuesday, published Friday. Futures on JPY and EUR are "
+            "quoted as the foreign currency, so a negative number is short yen "
+            "(long USDJPY). Percentile is against the available five-year window.</div>",
+            unsafe_allow_html=True)
+    ui.sources_note(list(live.values()))

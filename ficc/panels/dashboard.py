@@ -44,6 +44,7 @@ def render(years: list[int]) -> None:
      extras, move, real) = rates_panel._load(years)
     head, ladder, yields, banks, clo, etfs, vix, defaults = credit_panel._load()
     f, slow, mkt = overview_panel._load()
+    plumbing, cp, eur, estr, _auctions = rates_panel._load_extra()
     # The shared overview basket has no yen, and the yen is the whole point of
     # the global block -- pull it here (cached, one symbol).
     jpy = _usdjpy()
@@ -54,13 +55,8 @@ def render(years: list[int]) -> None:
     iorb = extras.get("IORB")
 
     # ------------------------------------------------------ status strip
-    comp = overview_panel._components(f, slow, mkt)
-    valid = {k: v for k, v in comp.items() if v == v}
-    score = (sum(overview_panel.WEIGHTS[k] * v for k, v in valid.items())
-             / sum(overview_panel.WEIGHTS[k] for k in valid)) if valid else float("nan")
-    _, label = an.regime_score({"s": score})
-    band = (theme.CRITICAL if score <= -0.5 else theme.SERIOUS if score <= -0.15
-            else theme.INK_2 if score < 0.15 else theme.GOOD)
+    score, label, band = overview_panel.composite(
+        overview_panel._components(f, slow, mkt))
 
     def _d(v, unit="bp"):
         """Level plus its 1-day change -- a level alone cannot say 'selloff'."""
@@ -70,7 +66,7 @@ def render(years: list[int]) -> None:
         return (f"<span style='font-size:10.5px;color:{c};margin-left:5px'>"
                 f"{v:+.0f}{unit}</span>")
 
-    items = [("Regime", f"{score:+.2f} {label}", band)]
+    items = [("Regime", f"{ui.fmt(score, 2, plus=True)} {label}", band)]
     if ust.ok:
         items.append(("10Y", f"{ust.frame['10 Yr'].iloc[-1]:.2f}%"
                       + _d(an.pct_change_bp(ust.frame["10 Yr"], 1)), theme.INK))
@@ -112,6 +108,12 @@ def render(years: list[int]) -> None:
                              ("3m10y", "3 Mo", "10 Yr")):
             if lo in ust.frame.columns and hi in ust.frame.columns:
                 curve_rows.append(_slope_row(ust, name, lo, hi))
+        if {"2 Yr", "5 Yr", "10 Yr"} <= set(ust.frame.columns):
+            # Positive = the belly is cheap to the wings.
+            fly = an.butterfly(ust.frame, "2 Yr", "5 Yr", "10 Yr")
+            curve_rows.append(monitor.Row("2s5s10s fly", fly, float(fly.iloc[-1]),
+                                          unit="bp", dp=0, mode="rates",
+                                          chg_unit="pts", chg_dp=0, as_of=ust.as_of))
 
     front_rows = [
         R(sofr_on, "SOFR o/n", col="percentRate", mode="rates"),
@@ -127,6 +129,14 @@ def render(years: list[int]) -> None:
             "SOFR − IORB", (d["s"] - d["i"]) * 100,
             float((d["s"] - d["i"]).iloc[-1] * 100), unit="bp", dp=0,
             mode="risk", chg_unit="pts", chg_dp=0, as_of=sofr_on.as_of))
+
+    cps = rates_panel.cp_spread(cp)
+    if cps is not None and len(cps):
+        front_rows.append(monitor.Row(
+            "CP A2/P2 − AA", cps, float(cps.iloc[-1]), unit="bp", dp=0, mode="risk",
+            chg_unit="pts", chg_dp=0, as_of=cps.index[-1].date()))
+    front_rows.append(R(plumbing.get("RRPONTSYD"), "ON RRP ($bn)", mode="rates",
+                        unit="", dp=0, chg_unit="pts", chg_dp=0))
 
     infl_rows = [
         R(extras.get("T10YIE"), "10y breakeven", mode="rates"),
@@ -170,7 +180,18 @@ def render(years: list[int]) -> None:
         global_rows.append(monitor.Row("10y UST − JGB", spd, float(spd.iloc[-1]),
                                        unit="bp", dp=0, mode="rates",
                                        chg_unit="pts", chg_dp=0,
-                                       as_of=long_ust.as_of))
+                                       as_of=min(long_ust.as_of, jgb.as_of)))
+    if eur.ok and "10Y" in eur.frame.columns:
+        global_rows.append(R(eur, "EUR AAA 10Y", col="10Y", mode="rates"))
+        if long_ust and long_ust.ok:
+            d = pd.concat([long_ust.col.rename("u"), eur.frame["10Y"].rename("e")],
+                          axis=1).ffill().dropna()
+            spd = (d["u"] - d["e"]) * 100
+            global_rows.append(monitor.Row("10y UST − EUR AAA", spd, float(spd.iloc[-1]),
+                                           unit="bp", dp=0, mode="rates",
+                                           chg_unit="pts", chg_dp=0,
+                                           as_of=min(long_ust.as_of, eur.as_of)))
+    global_rows.append(R(estr, "EUR STR", mode="rates"))
     if jpy is not None and jpy.ok:
         global_rows.append(R(jpy, "USDJPY", mode="perf", unit="", dp=2, chg_unit="%"))
     dxy = mkt.get("DX-Y.NYB")
@@ -196,8 +217,10 @@ def render(years: list[int]) -> None:
         f"One convention throughout: <span style='color:{theme.RED_RATE}'>red</span> "
         f"= the number rose, <span style='color:{theme.BLUE_RATE}'>blue</span> = it "
         "fell — for every row, and for the sparkline too. Not good/bad, because "
-        "tighter spreads are only good if you are long. Range is each series "
-        "against its own available history; "
+        "tighter spreads are only good if you are long. Changes are calendar "
+        "lookbacks (1W = seven days back), and 1D is left blank for series that "
+        "do not print daily. Range is each series against its trailing three "
+        "years, or less where the source serves less; "
         f"<span style='color:{theme.SERIOUS}'>amber</span> marks past the 10th/90th "
         "percentile. 'As of' is the source's observation date, not the pull time."
         "</div>", unsafe_allow_html=True)
@@ -381,11 +404,7 @@ def render(years: list[int]) -> None:
                              jgb.frame["10Y"].rename("jgb")], axis=1).ffill().dropna()
             dfb["diff"] = (dfb["ust"] - dfb["jgb"]) * 100
             dfb = dfb.tail(756)
-            roll = [np.nan if i < 250 else
-                    an.beta(dfb["spot"].iloc[i - 250:i + 1],
-                            dfb["diff"].iloc[i - 250:i + 1], 250)[0] * 100
-                    for i in range(len(dfb))]
-            dfb["b"] = roll
+            dfb["b"] = an.rolling_beta(dfb["spot"], dfb["diff"], 250) * 100
             fig = go.Figure(go.Scatter(x=dfb.index, y=dfb["b"], name="beta",
                                        line=dict(width=1.8, color=theme.VIOLET),
                                        hovertemplate="%{y:.1f} yen/100bp<extra></extra>"))
@@ -395,7 +414,7 @@ def render(years: list[int]) -> None:
                 yaxis=dict(title="yen/100bp"))
             ui.chart(fig, height=H, legend=False, compact=True)
 
-    ui.sources_note([ust, jgb, sofr_fwd, hy, move])
+    ui.sources_note([ust, jgb, sofr_fwd, hy, move, eur])
     st.markdown("</div>", unsafe_allow_html=True)
 
 

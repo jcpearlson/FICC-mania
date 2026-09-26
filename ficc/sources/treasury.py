@@ -14,7 +14,7 @@ import io
 import pandas as pd
 
 from .. import cache, http
-from ..contract import Series, Status, failed
+from ..contract import Series, failed, worst_status
 
 BASE = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv"
 
@@ -58,7 +58,7 @@ def curve(years: list[int], kind: str = NOMINAL, label: str = "UST par curve") -
         return failed("ust_curve", label, "US Treasury", "all years failed")
     frame = pd.concat(frames).sort_index()
     frame = frame[~frame.index.duplicated(keep="last")]
-    status = Status.STALE if any(str(m).startswith("stale") for m in metas) else Status.OK
+    status = worst_status(metas)
     return Series(
         key=f"ust_{kind}",
         label=label,

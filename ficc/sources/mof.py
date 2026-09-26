@@ -19,7 +19,7 @@ import io
 import pandas as pd
 
 from .. import cache, http
-from ..contract import Series, Status, failed
+from ..contract import Series, failed, worst_status
 
 BASE = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate"
 CURRENT = f"{BASE}/jgbcme.csv"
@@ -63,5 +63,5 @@ def curve(with_history: bool = True) -> Series:
     return Series(
         key="jgb", label="JGB par curve", frame=frame,
         source="MOF Japan", unit="%", cadence_days=1,
-        status=Status.STALE if any(str(m).startswith("stale") for m in metas) else Status.OK,
+        status=worst_status(metas),
     )

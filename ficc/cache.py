@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import pandas as pd
+
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -58,6 +60,25 @@ def store(source: str, key: str, payload: Any, params: Any = None) -> None:
         pass  # a cache write failure is never fatal
 
 
+class EmptyPayload(ValueError):
+    """A fetch that 'succeeded' but returned nothing usable."""
+
+
+def _check(payload: Any) -> Any:
+    """Refuse to cache an empty frame.
+
+    Several sources answer a bad day with HTTP 200 and no rows -- FRED under
+    concurrent load, yfinance for a symbol it cannot resolve. Caching that
+    would overwrite the last good payload with nothing and then serve the
+    nothing for a full TTL, which is strictly worse than the stale fallback.
+    Raising here routes it into the same path as a network failure.
+    """
+    if isinstance(payload, (pd.DataFrame, pd.Series)):
+        if payload.empty or payload.isna().all(axis=None):
+            raise EmptyPayload("source returned no usable rows")
+    return payload
+
+
 def through(source: str, key: str, ttl: int, fn: Callable[[], Any], params: Any = None):
     """Cache-through with stale fallback.
 
@@ -68,7 +89,7 @@ def through(source: str, key: str, ttl: int, fn: Callable[[], Any], params: Any 
     if hit is not None and hit[1]:
         return hit[0], "cached"
     try:
-        payload = fn()
+        payload = _check(fn())
         store(source, key, payload, params)
         return payload, "live"
     except Exception:
@@ -81,7 +102,8 @@ def clear() -> int:
     n = 0
     for f in CACHE_DIR.glob("*.pkl"):
         try:
-            f.unlink(); n += 1
+            f.unlink()
+            n += 1
         except Exception:
             pass
     return n
