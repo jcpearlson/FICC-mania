@@ -31,3 +31,19 @@ def test_render_escapes_labels_and_trims_spark():
     html = monitor.render_html([("G", [row, None])])
     assert "&lt;b&gt;x&lt;/b&gt;" in html
     assert html.count("<polyline") == 1
+
+
+def test_search_export_and_explicit_change_units():
+    dates = pd.to_datetime(['2026-01-01', '2026-01-02'])
+    hy = monitor.Row('HY OAS', pd.Series([3., 3.1], index=dates), 310., unit='bp', scale=100)
+    fx = monitor.Row('USDJPY', pd.Series([100., 101.], index=dates), 101., chg_unit='%')
+    groups = [('Credit', [hy]), ('Global', [fx])]
+    selected = monitor.filter_groups(groups, '  hy  ')
+    frame = monitor.to_frame(selected)
+    assert frame.Instrument.tolist() == ['HY OAS']
+    assert frame['1D'].iloc[0] == pytest.approx(10.)
+    assert frame['Change unit'].iloc[0] == 'bp'
+    assert monitor.to_frame(monitor.filter_groups(groups, group='Global'))['1D'].iloc[0] == pytest.approx(1.)
+    assert monitor.to_frame(monitor.filter_groups(groups, 'nothing')).empty
+    html = monitor.render_html(groups)
+    assert '1D change in bp' in html and '1D change in % return' in html

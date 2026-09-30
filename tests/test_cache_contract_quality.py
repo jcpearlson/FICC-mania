@@ -56,7 +56,40 @@ def test_quality_failed_series():
     assert r.worst == "failed" and r.flags == ["boom"]
 
 
-def test_lag_clamped_for_forward_dated_rates():
+def test_future_dates_preserved_and_flagged():
     fwd = pd.DataFrame({"v": [1.0]}, index=[pd.Timestamp.today() + pd.Timedelta(days=3)])
     s = Series("iorb", "IORB", fwd, "FRED", as_of=(dt.date.today() + dt.timedelta(days=3)))
-    assert s.lag_days() == 0
+    assert s.lag_days() == -3
+    assert any("future" in f for f in quality.assess(s).flags)
+    from ficc.ui import badge_html
+    assert "future date" in badge_html(s) and "today" not in badge_html(s)
+
+
+def test_next_day_fx_is_explicit_session():
+    from ficc.ui import badge_html
+    tomorrow = dt.date.today() + dt.timedelta(days=1)
+    s = Series("fx", "FX", _daily([1, 2]), "Yahoo Finance", as_of=tomorrow,
+               date_basis="session")
+    assert "source session" in badge_html(s) and "today" not in badge_html(s)
+    assert not any("future" in f for f in quality.assess(s).flags)
+
+
+def test_cached_and_stale_payloads_keep_actual_pull_time(tmp_cache):
+    frame, _ = cache.through("t", "k", 999, lambda: _daily([1, 2]))
+    pulled = frame.attrs[cache.FETCHED_AT]
+    cached, meta = cache.through("t", "k", 999, lambda: pytest.fail("network on cache hit"))
+    assert meta == "cached" and cached.attrs[cache.FETCHED_AT] == pulled
+    stale, meta = cache.through("t", "k", 0, lambda: pd.DataFrame())
+    assert meta.startswith("stale")
+    assert Series("k", "K", stale, "T").fetched_at == pulled
+
+
+def test_legacy_cache_uses_write_time(tmp_cache):
+    import os
+    import pickle
+    path = cache._path("t", "legacy")
+    path.write_bytes(pickle.dumps(_daily([1, 2])))
+    stamp = 1700000000
+    os.utime(path, (stamp, stamp))
+    frame, _, _ = cache.load("t", "legacy", 999)
+    assert frame.attrs[cache.FETCHED_AT].timestamp() == stamp

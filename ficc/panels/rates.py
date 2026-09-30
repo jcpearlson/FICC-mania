@@ -19,19 +19,19 @@ from .. import theme, ui
 from ..sources import ecb, fred, market, mof, nyfed, treasury, treasurydirect
 
 # Fed balance sheet plumbing. Units differ at source and are reconciled in
-# analytics.net_liquidity -- WALCL is $mn, the rest $bn.
+# analytics.net_liquidity -- only ON RRP is $bn; the H.4.1 series are $mn.
 PLUMBING = {
     "WALCL": ("Fed total assets ($mn)", 7),
-    "WTREGEN": ("Treasury General Account ($bn)", 7),
+    "WTREGEN": ("Treasury General Account ($mn)", 7),
     "RRPONTSYD": ("ON RRP take-up ($bn)", 1),
-    "WRESBAL": ("Reserve balances ($bn)", 7),
+    "WRESBAL": ("Reserve balances ($mn)", 7),
 }
 # Front-end credit: lower-tier (A2/P2) minus AA non-financial 90-day CP.
 CP = {"RIFSPPNA2P2D90NB": "A2/P2 nonfinancial CP 90d",
       "DCPN3M": "AA nonfinancial CP 90d"}
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _load(years: list[int]):
     ust = treasury.curve(years)
     jgb = mof.curve()
@@ -53,7 +53,7 @@ def _load(years: list[int]):
     return (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg, extras, move, real)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _load_extra():
     """Newer sources, loaded apart from `_load` so its tuple stays stable."""
     plumbing = {k: fred.get(k, lbl, cadence_days=cad) for k, (lbl, cad) in PLUMBING.items()}
@@ -81,6 +81,11 @@ def render(years: list[int]) -> None:
     (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg,
      extras, move, real) = _load(years)
     plumbing, cp, eur, estr, auctions = _load_extra()
+    ui.quality_summary([(ust, "10 Yr"), (jgb, "10Y"), (sofr_fwd, "implied_rate"),
+                        (ff, "implied_rate"), (sofr_on, "percentRate"), (effr, "percentRate"),
+                        (real, None), (move, None), (eur, "10Y"), (estr, None),
+                        (auctions, "btc"), *[(s, None) for s in
+                        (*extras.values(), *plumbing.values(), *cp.values())]])
 
     # ---- headline tiles ------------------------------------------------
     tiles = []
@@ -110,7 +115,7 @@ def render(years: list[int]) -> None:
 
     # ---- the three curves ---------------------------------------------
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-    c1, c2 = st.columns([1.35, 1])
+    c1, c2 = ui.columns([1.35, 1])
 
     with c1:
         fig = go.Figure()
@@ -134,7 +139,8 @@ def render(years: list[int]) -> None:
             fig.add_trace(go.Scatter(
                 x=fwd["years_fwd"], y=fwd["implied_rate"], name="SOFR forward (futures)",
                 mode="lines+markers", line=dict(width=2.4, color=theme.ORANGE),
-                marker=dict(size=7), hovertemplate="%{y:.2f}%<extra>SOFR fwd</extra>"))
+                marker=dict(size=7), customdata=pd.to_datetime(fwd["observed_at"]).dt.strftime("%d %b %Y"),
+                hovertemplate="%{y:.2f}% · quote %{customdata}<extra>SOFR fwd</extra>"))
         if jgb.ok:
             jr = jgb.frame.iloc[-1]
             xs = [mof.TENORS[c] for c in jgb.frame.columns if c in mof.TENORS
@@ -205,7 +211,7 @@ def render(years: list[int]) -> None:
             ui.chart(fig, height=340, legend=False, unified=False)
 
     # ---- policy path + front end ---------------------------------------
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = ui.columns(3)
     with c1:
         if ff.ok:
             d = ff.frame
@@ -213,7 +219,8 @@ def render(years: list[int]) -> None:
                 x=d.index, y=d["implied_rate"], mode="lines+markers",
                 line=dict(width=2.4, color=theme.VIOLET), marker=dict(size=8),
                 name="Implied EFFR",
-                hovertemplate="%{x|%b %Y}: %{y:.3f}%<extra></extra>"))
+                customdata=pd.to_datetime(d["observed_at"]).dt.strftime("%d %b %Y"),
+                hovertemplate="%{x|%b %Y}: %{y:.3f}% · quote %{customdata}<extra></extra>"))
             if effr.ok:
                 cur = effr.latest("percentRate")
                 fig.add_hline(y=cur, line=dict(color=theme.MUTED, width=1, dash="dot"),
@@ -258,27 +265,30 @@ def render(years: list[int]) -> None:
         if (long_ust and long_ust.ok) and jgb.ok:
             u = long_ust.col.dropna()
             j = jgb.frame["10Y"].dropna()
-            df = pd.concat([u.rename("ust"), j.rename("jgb")], axis=1).ffill().dropna()
-            # Score against the full common history, then truncate for display.
-            # Scoring a series that has already been cut to two years makes the
-            # window equal the sample, so the verdict can never say anything.
-            sp_full = (df["ust"] - df["jgb"]) * 100
-            z = an.zscore(sp_full, 10)
-            sp = sp_full[sp_full.index >= sp_full.index[-1] - pd.Timedelta(days=730)]
-            fig = go.Figure(go.Scatter(
-                x=sp.index, y=sp, line=dict(width=2, color=theme.MAGENTA),
-                name="10y UST − JGB",
-                hovertemplate="%{y:.0f} bp<extra></extra>"))
-            fig.update_layout(
-                title=f"10y UST − JGB spread · {sp.iloc[-1]:.0f} bp"
-                      + (f" ({z.verdict_width}, {z.window_label})" if z else ""),
-                yaxis=dict(title="bp"))
-            ui.chart(fig, height=290, legend=False)
+            df = an.align_recent({"ust": u, "jgb": j})
+            if df.empty:
+                st.caption("UST and JGB have no recent overlapping observations.")
+            else:
+                # Score against the full common history, then truncate for display.
+                # Scoring a series that has already been cut to two years makes the
+                # window equal the sample, so the verdict can never say anything.
+                sp_full = (df["ust"] - df["jgb"]) * 100
+                z = an.zscore(sp_full, 10)
+                sp = sp_full[sp_full.index >= sp_full.index[-1] - pd.Timedelta(days=730)]
+                fig = go.Figure(go.Scatter(
+                    x=sp.index, y=sp, line=dict(width=2, color=theme.MAGENTA),
+                    name="10y UST − JGB",
+                    hovertemplate="%{y:.0f} bp<extra></extra>"))
+                fig.update_layout(
+                    title=f"10y UST − JGB spread · {sp.iloc[-1]:.0f} bp"
+                          + (f" ({z.verdict_width}, {z.window_label})" if z else ""),
+                    yaxis=dict(title="bp"))
+                ui.chart(fig, height=290, legend=False)
 
     # ---- carry, roll-down and the breakeven -----------------------------
     ui.section("Carry & roll-down",
                "what the curve pays you to own it, and how big a selloff wipes that out")
-    c1, c2 = st.columns([1.25, 1])
+    c1, c2 = ui.columns([1.25, 1])
     # Finance a 3-month hold at the 3-month rate, not at overnight. Using the
     # overnight rate understates the cost of carry by the whole front-end slope
     # (~25bp today), which flows into carry and breakeven for every tenor.
@@ -339,7 +349,7 @@ def render(years: list[int]) -> None:
                     unsafe_allow_html=True)
 
     # ---- inflation, term premium & reserve scarcity ---------------------
-    c1, c2 = st.columns(2)
+    c1, c2 = ui.columns(2)
     with c1:
         be = [extras.get(k) for k in ("T10YIE", "T5YIFR", "DFII10", "THREEFYTP10")]
         if any(s and s.ok for s in be):
@@ -384,8 +394,9 @@ def render(years: list[int]) -> None:
             ui.chart(fig, height=290, legend=False)
             st.markdown(
                 f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
-                "The cleanest single gauge of reserve scarcity. Persistently positive "
-                "means cash is getting scarce relative to collateral.</div>",
+                "A positive spread can indicate money-market funding pressure. It also "
+                "reflects calendar effects and market structure; it does not identify "
+                "reserve scarcity on its own.</div>",
                 unsafe_allow_html=True)
 
     _plumbing(plumbing, cp)
@@ -401,7 +412,7 @@ def _plumbing(plumbing: dict, cp: dict) -> None:
     """Liquidity: how much central-bank cash is in the system, and front-end credit."""
     ui.section("Liquidity & plumbing",
                "Fed balance sheet net of TGA and RRP, reserves, and front-end credit stress")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = ui.columns(3)
     w, t, r = (plumbing.get(k) for k in ("WALCL", "WTREGEN", "RRPONTSYD"))
     with c1:
         if all(s_ and s_.ok for s_ in (w, t, r)):
@@ -429,7 +440,7 @@ def _plumbing(plumbing: dict, cp: dict) -> None:
         for s_, name, color in ((res, "Reserves", theme.AQUA),
                                 (rrp, "ON RRP", theme.ORANGE)):
             if s_ and s_.ok:
-                d = (s_.col / 1e3).tail(1100)
+                d = (s_.col / (1e6 if s_.key == "WRESBAL" else 1e3)).tail(1100)
                 fig.add_trace(go.Scatter(x=d.index, y=d, name=name,
                                          line=dict(width=2, color=color),
                                          hovertemplate="$%{y:.2f}tn<extra>"
@@ -489,7 +500,7 @@ def _auctions(auctions) -> None:
         + _cell(r.dealer_pct_vs_avg, 1, good_up=False, suffix="pp")
         + "</tr>"
         for r in recent.itertuples())
-    c1, c2 = st.columns([1.35, 1])
+    c1, c2 = ui.columns([1.35, 1])
     with c1:
         st.markdown(
             '<table class="ficc-tbl"><tr><th>Date</th><th style="text-align:left">Security</th>'

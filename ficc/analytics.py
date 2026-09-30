@@ -148,6 +148,18 @@ def ratio(a: pd.Series, b: pd.Series, name: str = "ratio") -> pd.Series:
     return (df["a"] / df["b"]).rename(name)
 
 
+def align_recent(series_map: dict[str, pd.Series], max_age_days: int = 7) -> pd.DataFrame:
+    """Align holiday calendars without extending a stopped source indefinitely."""
+    data = {k: pd.Series(v).replace([np.inf, -np.inf], np.nan).dropna().sort_index()
+            for k, v in series_map.items()}
+    frame = pd.concat(data, axis=1).sort_index()
+    for name, values in data.items():
+        dates = pd.Series(values.index, index=values.index).reindex(frame.index).ffill()
+        age = (pd.Series(frame.index, index=frame.index) - dates).dt.total_seconds() / 86400
+        frame[name] = frame[name].ffill().where(age <= max_age_days)
+    return frame.dropna()
+
+
 def beta(y: pd.Series, x: pd.Series, window_days: int = 252) -> tuple[float, float, float]:
     """OLS slope, intercept and R^2 of y on x over a trailing window.
 
@@ -230,7 +242,7 @@ def regime_score(components: dict[str, float]) -> tuple[float, str]:
     Deliberately simple and transparent: an opaque composite that cannot be
     decomposed on the page is not useful to a practitioner.
     """
-    vals = [v for v in components.values() if v is not None and not np.isnan(v)]
+    vals = [v for v in components.values() if v is not None and np.isfinite(v)]
     if not vals:
         return float("nan"), "no data"
     score = float(np.mean(vals))
@@ -396,12 +408,12 @@ def loss_to_default_rate(loss_pct: float | pd.Series, recovery: float = 0.40):
     return loss_pct / (1.0 - recovery)
 
 
-def net_liquidity(walcl_mn: pd.Series, tga_bn: pd.Series, rrp_bn: pd.Series) -> pd.Series:
+def net_liquidity(walcl_mn: pd.Series, tga_mn: pd.Series, rrp_bn: pd.Series) -> pd.Series:
     """Fed balance sheet minus TGA minus ON RRP, in $ trillions.
 
     The market's shorthand for how much central-bank liquidity is actually in
     the private system. Units differ at source -- WALCL is in $ millions,
-    WTREGEN and RRPONTSYD in $ billions -- which is exactly the kind of thing
+    WTREGEN is also in $ millions; RRPONTSYD is in $ billions. This is the kind of thing
     that silently produces a 1000x error, so the conversion lives here once.
 
     Evaluated on the balance-sheet dates (weekly, Wednesday); the daily RRP is
@@ -409,7 +421,7 @@ def net_liquidity(walcl_mn: pd.Series, tga_bn: pd.Series, rrp_bn: pd.Series) -> 
     """
     w = pd.Series(walcl_mn).dropna() / 1e6
     parts = pd.concat([w.rename("w"),
-                       (pd.Series(tga_bn) / 1e3).rename("t"),
+                       (pd.Series(tga_mn) / 1e6).rename("t"),
                        (pd.Series(rrp_bn) / 1e3).rename("r")], axis=1).sort_index()
     parts[["t", "r"]] = parts[["t", "r"]].ffill()
     parts = parts.loc[parts.index.isin(w.index)].dropna()

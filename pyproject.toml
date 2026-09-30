@@ -5,7 +5,7 @@ description = "A practitioner's FICC dashboard built entirely on free, public da
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "streamlit>=1.40",
+    "streamlit>=1.62",
     "plotly>=5.24",
     "pandas>=2.2",
     "numpy>=1.26",

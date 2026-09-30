@@ -52,8 +52,13 @@ class Series:
     unit: str = ""
     note: str = ""
     cadence_days: float = 1.0   # expected publication cadence, in days
+    date_basis: str = "observation"  # observation | session | curve
+    observation_timezone: str = ""  # only populated when supplied by the source
 
     def __post_init__(self) -> None:
+        cached_pull = self.frame.attrs.get("ficc_fetched_at")
+        if isinstance(cached_pull, _dt.datetime):
+            self.fetched_at = cached_pull
         if self.as_of is None and len(self.frame):
             idx = self.frame.index[-1]
             self.as_of = idx.date() if hasattr(idx, "date") else idx
@@ -85,13 +90,12 @@ class Series:
     def lag_days(self) -> float | None:
         """How many days behind today the observation is.
 
-        Clamped at zero: some administered rates (IORB) are published with a
-        forward effective date, which would otherwise give a negative lag and
-        badge a not-yet-applicable rate as fresher than today's data.
+        Negative values are preserved: a future session or effective date is
+        different from today's observation and must be labelled explicitly.
         """
         if self.as_of is None:
             return None
-        return max(0, (now().date() - self.as_of).days)
+        return (now().astimezone().date() - self.as_of).days
 
     @property
     def freshness(self) -> Status:

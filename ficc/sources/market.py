@@ -16,7 +16,14 @@ import warnings
 import pandas as pd
 
 from .. import cache
-from ..contract import Series, failed, status_from
+from ..contract import Series, failed, status_from, worst_status
+
+
+def _date_metadata(symbol: str, frame: pd.DataFrame) -> dict:
+    """Daily FX dates identify the provider's session, not the app's calendar."""
+    tz = getattr(frame.index, "tz", None)
+    return {"date_basis": "session" if symbol.endswith("=X") else "observation",
+            "observation_timezone": str(tz) if tz is not None else ""}
 
 warnings.filterwarnings("ignore", module="yfinance")
 
@@ -74,6 +81,7 @@ def quote(symbol: str, label: str, *, unit: str = "", period: str = "1y",
         key=symbol, label=label, frame=out, source="Yahoo Finance",
         unit=unit, cadence_days=1,
         status=status_from(meta),
+        **_date_metadata(symbol, out),
     )
 
 
@@ -95,7 +103,8 @@ def basket(spec: dict[str, str], period: str = "2y",
     for sym, label in spec.items():
         if sym in frame.columns and frame[sym].notna().any():
             out[sym] = Series(key=sym, label=label, frame=frame[[sym]].dropna(),
-                              source="Yahoo Finance", cadence_days=1, status=status)
+                              source="Yahoo Finance", cadence_days=1, status=status,
+                              **_date_metadata(sym, frame))
         else:
             out[sym] = failed(sym, label, "Yahoo Finance", "symbol returned no data")
     return out
@@ -183,6 +192,7 @@ def futures_strip(root: str = "SR3", n: int = 12, quarterly: bool = True,
                 break          # truncate here; everything beyond is thinner still
             rows.append({"expiry": expiry, "symbol": sym, "years_fwd": yrs,
                          "price": float(close.iloc[-1]),
+                         "observed_at": close.index[-1],
                          "implied_rate": 100.0 - float(close.iloc[-1]),
                          "avg_volume": avg_vol})
         if not rows:
@@ -190,16 +200,18 @@ def futures_strip(root: str = "SR3", n: int = 12, quarterly: bool = True,
         return pd.DataFrame(rows).set_index("expiry").sort_index()
 
     try:
-        frame, meta = cache.through("yahoo", f"strip_{root}_{n}_{min_volume}",
-                                    cache.TTL_INTRADAY, pull)
+        frame, meta = cache.through("yahoo", f"strip_v2_{root}_{n}_{min_volume}",
+                                    cache.TTL_INTRADAY, pull,
+                                    params=[symbol for symbol, _, _ in pairs])
     except Exception as e:
         return failed(root, label, "Yahoo Finance (CME futures)", e)
     return Series(
         key=root, label=label, frame=frame,
         source="Yahoo Finance (CME futures)", unit="%", cadence_days=1,
-        as_of=pd.Timestamp.today().date(),
+        as_of=pd.Timestamp(frame["observed_at"].min()).date(), date_basis="curve",
         status=status_from(meta),
-        note="Implied rate = 100 - price; plotted at its reference-period midpoint.",
+        note="Implied rate = 100 - price; plotted at its reference-period midpoint. "
+             "Observation date is the oldest contract quote in the curve.",
     )
 
 
@@ -235,20 +247,25 @@ def commodity_curve(root: str = "CL", n: int = 8, label: str = "") -> Series:
         for sym, expiry in pairs:
             if sym in frame.columns and frame[sym].notna().any():
                 rows.append({"expiry": expiry, "symbol": sym,
-                             "price": float(frame[sym].dropna().iloc[-1])})
+                             "price": float(frame[sym].dropna().iloc[-1]),
+                             "observed_at": frame[sym].dropna().index[-1]})
         if not rows:
             raise RuntimeError(f"no {root} contracts returned data")
-        return pd.DataFrame(rows).set_index("expiry").sort_index()
+        out = pd.DataFrame(rows).set_index("expiry").sort_index()
+        out.attrs = frame.attrs.copy()
+        return out
 
     try:
-        frame, meta = cache.through("yahoo", f"cmdty_{root}_{n}", cache.TTL_INTRADAY, pull)
+        frame, meta = cache.through("yahoo", f"cmdty_v2_{root}_{n}", cache.TTL_INTRADAY,
+                                    pull, params=[symbol for symbol, _ in pairs])
     except Exception as e:
         return failed(root, label or root, "Yahoo Finance (CME futures)", e)
     return Series(
         key=root, label=label or root, frame=frame,
         source="Yahoo Finance (CME futures)", cadence_days=1,
-        as_of=pd.Timestamp.today().date(),
-        status=status_from(meta),
+        as_of=pd.Timestamp(frame["observed_at"].min()).date(), date_basis="curve",
+        status=worst_status([meta, frame.attrs.get("meta", "live")]),
+        note="Observation date is the oldest contract quote in the curve.",
     )
 
 

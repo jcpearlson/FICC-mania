@@ -12,6 +12,7 @@ series does not change within the hour, so re-pulling it is pure waste.
 from __future__ import annotations
 
 import hashlib
+import datetime as dt
 import json
 import pickle
 import time
@@ -28,6 +29,15 @@ TTL_INTRADAY = 120        # live quotes
 TTL_DAILY = 30 * 60       # daily-published series
 TTL_WEEKLY = 6 * 60 * 60  # weekly releases
 TTL_HEAVY = 24 * 60 * 60  # large static-ish downloads (ACM xls, CFTC zip)
+FETCHED_AT = "ficc_fetched_at"
+
+
+def _stamp(payload: Any, fetched_at: dt.datetime) -> Any:
+    """Keep the successful pull time with the payload, including on cache hits."""
+    if isinstance(payload, (pd.DataFrame, pd.Series)):
+        payload = payload.copy()
+        payload.attrs.setdefault(FETCHED_AT, fetched_at)
+    return payload
 
 
 def _path(source: str, key: str, params: Any = None) -> Path:
@@ -45,9 +55,13 @@ def load(source: str, key: str, ttl: int, params: Any = None) -> tuple[Any, bool
     if not p.exists():
         return None
     try:
-        age = time.time() - p.stat().st_mtime
+        written = p.stat().st_mtime
+        age = time.time() - written
         with p.open("rb") as fh:
-            return pickle.load(fh), age < ttl, age
+            # Legacy payloads have no timestamp; their write time is the best
+            # available pull time. Never replace it with the current time.
+            payload = _stamp(pickle.load(fh), dt.datetime.fromtimestamp(written, dt.timezone.utc))
+            return payload, age < ttl, age
     except Exception:
         return None
 
@@ -55,7 +69,8 @@ def load(source: str, key: str, ttl: int, params: Any = None) -> tuple[Any, bool
 def store(source: str, key: str, payload: Any, params: Any = None) -> None:
     try:
         with _path(source, key, params).open("wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(_stamp(payload, dt.datetime.now(dt.timezone.utc)), fh,
+                        protocol=pickle.HIGHEST_PROTOCOL)
     except Exception:
         pass  # a cache write failure is never fatal
 
@@ -89,7 +104,7 @@ def through(source: str, key: str, ttl: int, fn: Callable[[], Any], params: Any 
     if hit is not None and hit[1]:
         return hit[0], "cached"
     try:
-        payload = _check(fn())
+        payload = _stamp(_check(fn()), dt.datetime.now(dt.timezone.utc))
         store(source, key, payload, params)
         return payload, "live"
     except Exception:

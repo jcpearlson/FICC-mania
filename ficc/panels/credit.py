@@ -45,7 +45,7 @@ DEFAULTS = {"DRBLACBS": "Business loan delinquency rate",
             "CORBLACBS": "Business loan charge-off rate"}
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _load():
     head = fred.many(HEADLINE)
     ladder = fred.many(LADDER)
@@ -65,6 +65,8 @@ def _load():
 
 def render() -> None:
     head, ladder, yields, banks, clo, etfs, vix, defaults = _load()
+    ui.quality_summary([(s, None) for s in (*head.values(), *ladder.values(), *yields.values(),
+                        *banks.values(), *clo.values(), *etfs.values(), *defaults.values(), vix)])
 
     # ---- headline tiles, colored by where the spread sits in its own history
     tiles = []
@@ -89,7 +91,7 @@ def render() -> None:
     ui.tile_row(tiles[:5])
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-    c1, c2 = st.columns([1.3, 1])
+    c1, c2 = ui.columns([1.3, 1])
 
     with c1:
         fig = go.Figure()
@@ -139,7 +141,7 @@ def render() -> None:
     # ---- CLOs and loans -------------------------------------------------
     ui.section("Structured credit & loans",
                "CLO tranche spreads are not public — the listed CLO ETF complex is used as a daily proxy")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = ui.columns(3)
 
     with c1:
         avail = {lbl: clo[sym].col for sym, lbl in CLO_ETFS.items()
@@ -188,12 +190,12 @@ def render() -> None:
             ui.chart(fig, height=290, legend=False, unified=False)
             st.markdown(
                 f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
-                "Quarterly survey — above zero means banks are tightening. Leads "
-                "default rates by roughly three to four quarters.</div>",
+                "Quarterly survey — above zero means banks report tightening. This is "
+                "a lending-standards measure, not a calibrated default forecast.</div>",
                 unsafe_allow_html=True)
 
     # ---- credit vs vol divergence ---------------------------------------
-    c1, c2 = st.columns(2)
+    c1, c2 = ui.columns(2)
     with c1:
         hy = head.get("BAMLH0A0HYM2")
         if hy and hy.ok and vix.ok:
@@ -220,9 +222,9 @@ def render() -> None:
             ui.chart(fig, height=280)
             st.markdown(
                 f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
-                "Both series are standardised so they share one axis. A wide gap — "
-                "credit calm while vol is bid, or the reverse — is the divergence "
-                "worth acting on.</div>", unsafe_allow_html=True)
+                "Both series are standardised over the displayed sample. Positive gap "
+                "means HY spreads are higher relative to their history than VIX is. "
+                "This is descriptive positioning, not a tested trading signal.</div>", unsafe_allow_html=True)
 
     with c2:
         fig = go.Figure()
@@ -247,14 +249,13 @@ def render() -> None:
 def _risk_premium(head, yields, defaults) -> None:
     """Is the spread paying for the risk being taken?
 
-    Two readings a spread level alone cannot give. The implied default rate
-    inverts the credit triangle -- PD = OAS / (1 - recovery) -- into the annual
-    default rate the market is charging for. Spread share of yield says whether
-    the buyer is being paid for credit or simply for duration.
+    PD = OAS / (1 - recovery) allocates all spread to losses to give a default
+    equivalent, alongside a separate bank-loss proxy. OAS / effective yield
+    measures the spread share of yield, without decomposing return or sensitivity.
     """
     ui.section("Is the spread paying for the risk?",
-               "implied default rate against what actually defaults, and how much of the yield is credit")
-    c1, c2 = st.columns(2)
+               "spread-implied loss compensation, a separate bank-loss proxy, and spread share of yield")
+    c1, c2 = ui.columns(2)
 
     with c1:
         hy = head.get("BAMLH0A0HYM2")
@@ -264,7 +265,7 @@ def _risk_premium(head, yields, defaults) -> None:
         if hy and hy.ok:
             pd_hy = hy.col.apply(an.implied_default_rate)
             start = pd_hy.index[0]
-            fig.add_trace(go.Scatter(x=pd_hy.index, y=pd_hy, name="HY implied default rate",
+            fig.add_trace(go.Scatter(x=pd_hy.index, y=pd_hy, name="HY default equivalent (all OAS allocated to loss)",
                                      line=dict(width=2, color=theme.ORANGE),
                                      hovertemplate="%{y:.2f}%<extra>implied</extra>"))
         if chg and chg.ok:
@@ -273,26 +274,24 @@ def _risk_premium(head, yields, defaults) -> None:
             # which is the only way the two lines can share an axis honestly.
             d = an.loss_to_default_rate(chg.col)
             d = d[d.index >= start] if start is not None else d
-            fig.add_trace(go.Scatter(x=d.index, y=d, name="Bank C&I charge-offs, as default rate",
+            fig.add_trace(go.Scatter(x=d.index, y=d, name="Bank C&I default equivalent (different borrower pool)",
                                      line=dict(width=2, color=theme.AQUA, shape="hv"),
                                      hovertemplate="%{y:.2f}%<extra>realised</extra>"))
-        fig.update_layout(title="HY implied default rate vs realised losses (40% recovery)",
+        fig.update_layout(title="HY vs bank C&I default equivalents · 40% recovery assumption",
                           yaxis=dict(title="% per year", ticksuffix="%"))
         ui.chart(fig, height=280)
         if hy and hy.ok:
             oas = hy.latest()
             imp = an.implied_default_rate(oas)
             loss = chg.latest() if chg and chg.ok else float("nan")
-            xs = an.excess_over_loss(oas, loss)
             st.markdown(
                 f"<div style='font-size:11.5px;color:{theme.INK_2};margin-top:-4px'>"
-                f"At 40% recovery, {oas * 100:.0f}bp implies a "
-                f"<b style='color:{theme.INK}'>{imp:.2f}%</b> annual default rate. "
-                + (f"Bank C&amp;I charge-offs (a realised <em>loss</em> rate) are "
-                   f"running {loss:.2f}%, leaving roughly "
-                   f"<b style='color:{theme.INK}'>{xs * 100:.0f}bp</b> of spread over "
-                   "realised losses. Bank loans are senior and secured, so this is a "
-                   "loose proxy for HY losses and flatters the premium."
+                f"Allocating all {oas * 100:.0f}bp of OAS to losses, at 40% recovery, gives a "
+                f"<b style='color:{theme.INK}'>{imp:.2f}%</b> annual default equivalent. "
+                "OAS also compensates for liquidity and risk, so this is not a default forecast. "
+                + (f"Bank C&amp;I charge-offs are {loss:.2f}% (realised losses), "
+                   "from a different borrower pool and observation date. They do not measure "
+                   "HY losses; subtracting them from HY OAS would not isolate a credit premium."
                    if loss == loss else "")
                 + "</div>", unsafe_allow_html=True)
 
@@ -311,11 +310,11 @@ def _risk_premium(head, yields, defaults) -> None:
                                          line=dict(width=2, color=color),
                                          hovertemplate="%{y:.1f}%<extra>"
                                                        f"{name}</extra>"))
-            fig.update_layout(title="Spread share of yield — credit vs duration",
+            fig.update_layout(title="Spread share of yield — OAS / effective yield",
                               yaxis=dict(title="OAS / effective yield", ticksuffix="%"))
             ui.chart(fig, height=280)
             bits = " · ".join(f"{n} {s.iloc[-1]:.0f}%" for n, s in rows)
             st.markdown(
                 f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
-                f"{bits}. A low share means you are mostly being paid for duration, "
-                "not for taking credit risk.</div>", unsafe_allow_html=True)
+                f"{bits}. This is a spread-to-yield ratio, not a decomposition of expected "
+                "returns or a measure of rate sensitivity.</div>", unsafe_allow_html=True)

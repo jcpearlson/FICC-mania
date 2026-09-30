@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from . import analytics as an
+from . import quality
 from . import sparkline as sp
 from . import theme
 from .ui import esc
@@ -57,6 +58,8 @@ class Row:
     as_of: object | None = None
     scale: float = 1.0                  # multiply level for display (e.g. %→bp)
     chg_dp: int | None = None           # override decimals on change columns
+    inputs: tuple[Series, ...] = ()     # provenance also travels with derived rows
+    check_column: str | None = None
 
 
 def row_from(s: Series | None, label: str, *, mode: str = "rates",
@@ -64,8 +67,10 @@ def row_from(s: Series | None, label: str, *, mode: str = "rates",
              col: str | None = None, scale: float = 1.0,
              transform=None, chg_dp: int | None = None) -> Row | None:
     """Build a Row straight off a fetched Series, preserving its as_of."""
-    if s is None or not s.ok:
+    if s is None:
         return None
+    if not s.ok:
+        return Row(label, None, None, unit=unit, dp=dp, inputs=(s,), check_column=col)
     ser = s.frame[col] if col else s.col
     if transform is not None:
         ser = transform(ser)
@@ -74,7 +79,16 @@ def row_from(s: Series | None, label: str, *, mode: str = "rates",
         return None
     return Row(label=label, series=ser, value=float(ser.iloc[-1]) * scale,
                unit=unit, dp=dp, mode=mode, chg_unit=chg_unit, as_of=s.as_of,
-               scale=scale, chg_dp=chg_dp)
+               scale=scale, chg_dp=chg_dp, inputs=(s,), check_column=col)
+
+
+def row_issues(row: Row) -> list[str]:
+    issues = []
+    for s in row.inputs:
+        report = quality.assess(s, row.check_column if len(row.inputs) == 1 else None)
+        for flag in report.flags:
+            issues.append(f"{report.label}: {flag}")
+    return list(dict.fromkeys(issues))
 
 
 def _change(ser: pd.Series, lookback: pd.DateOffset | None,
@@ -121,8 +135,32 @@ def _fmt_chg(v: float | None, chg_unit: str, dp: int | None = None) -> str:
     return f"{v:+,.{dp}f}"
 
 
+def filter_groups(groups, query="", group="All groups"):
+    query = query.strip().casefold()
+    return [(name, [r for r in rows if r is not None and query in r.label.casefold()])
+            for name, rows in groups if group == "All groups" or name == group]
+
+
+def to_frame(groups) -> pd.DataFrame:
+    """Numeric export uses explicit units and observation dates, including warnings."""
+    rows = []
+    for group, instruments in groups:
+        for r in instruments:
+            if r is None:
+                continue
+            unit = "bp" if r.chg_unit == "bp" or r.unit == "bp" else "%" if r.chg_unit == "%" else "points"
+            record = {"Group": group, "Instrument": r.label, "Last": r.value,
+                      "Level unit": r.unit or "points", "Change unit": unit,
+                      "As of": r.as_of, "Warnings": "; ".join(row_issues(r))}
+            for name, lookback in LOOKBACKS:
+                record[name] = _change(r.series, lookback, r.chg_unit) if r.series is not None else None
+            rows.append(record)
+    return pd.DataFrame(rows, columns=["Group", "Instrument", "Last", "Level unit", "Change unit",
+                                       "1D", "1W", "1M", "3M", "As of", "Warnings"])
+
+
 def render_html(groups: list[tuple[str, list[Row | None]]],
-                spark_years: float = 3.0) -> str:
+                spark_years: float = 3.0, *, full: bool = False) -> str:
     """Render grouped rows as one compact HTML table."""
     # Sparkline sits next to Last so level and shape read as one glance, and
     # the range bar carries its own percentile number rather than spending a
@@ -131,7 +169,7 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
         '<tr class="mon-head">'
         '<th class="mon-name">Instrument</th><th>Last</th>'
         f'<th class="mon-spk">{spark_years:g}y</th>'
-        + "".join(f"<th>{n}</th>" for n, _ in LOOKBACKS)
+        + "".join(f'<th class="mon-{n.lower()}">{n}</th>' for n, _ in LOOKBACKS)
         + f'<th class="mon-rng">Position in {spark_years:g}y range</th>'
         '<th class="mon-as">As of</th></tr>'
     )
@@ -144,6 +182,9 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
         body.append(
             f'<tr class="mon-grp"><td colspan="{ncols}">{esc(gname)}</td></tr>')
         for r in live:
+            issues = row_issues(r)
+            warning = (f'<span class="mon-warning" title="{esc("; ".join(issues))}" '
+                       'aria-label="Data warning">▲</span> ' if issues else "")
             ser = r.series
             # The spark column is headed "3y", so draw 3y -- not the full
             # history, which for the JGB rows runs back to 1974.
@@ -152,18 +193,19 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
             z = an.zscore(ser, spark_years) if ser is not None else None
             pct = z.pct if z else None
 
-            cells = [f'<td class="mon-name">{esc(r.label)}</td>',
+            cells = [f'<td class="mon-name">{warning}{esc(r.label)}</td>',
                      f'<td class="mon-val">{_fmt(r.value, r.dp)}'
                      f'<span class="mon-unit">{r.unit}</span></td>',
                      f'<td class="mon-spk">{sp.spark(spk)}</td>']
-            for _, lb in LOOKBACKS:
+            for name, lb in LOOKBACKS:
                 c = _change(ser, lb, r.chg_unit) if ser is not None else None
                 # Direction only -- see the module docstring.
                 # A change that displays as 0 takes no colour either.
                 shown = (None if c is None or c != c
                          or round(c, _chg_dp(c, r.chg_unit, r.chg_dp)) == 0 else c)
                 color = theme.delta_color(shown, mode="rates")
-                cells.append(f'<td class="mon-chg" style="color:{color}">'
+                unit = "bp" if r.chg_unit == "bp" or r.unit == "bp" else "% return" if r.chg_unit == "%" else "points"
+                cells.append(f'<td class="mon-chg mon-{name.lower()}" title="{name} change in {unit}" style="color:{color}">'
                              f'{_fmt_chg(c, r.chg_unit, r.chg_dp)}</td>')
 
             pcol = (theme.SERIOUS if pct is not None and (pct >= 90 or pct <= 10)
@@ -174,17 +216,27 @@ def render_html(groups: list[tuple[str, list[Row | None]]],
                 f'<span class="mon-pct" style="color:{pcol}">{ptxt}</span></td>')
 
             stamp = f"{r.as_of:%d %b}" if r.as_of else "—"
-            cells.append(f'<td class="mon-as">{stamp}</td>')
+            session = any(s.date_basis == "session" for s in r.inputs)
+            if session:
+                stamp += ' <span class="mon-session">session</span>'
+            pulled = " | ".join(
+                f"{s.source}: pulled {s.fetched_at.astimezone():%d %b %H:%M %Z}"
+                if s.ok else f"{s.source}: no successful data pull"
+                for s in r.inputs)
+            colour = f'style="color:{theme.WARNING}"' if issues else ""
+            cells.append(f'<td class="mon-as" title="{esc(pulled)}"><span {colour}>{stamp}</span></td>')
             body.append("<tr>" + "".join(cells) + "</tr>")
 
-    return (f'<table class="mon">{head}{"".join(body)}</table>')
+    return ('<div class="ficc-table-scroll" role="region" aria-label="Market monitor" tabindex="0">'
+            f'<table class="mon {"mon-full" if full else "mon-compact"}">'
+            f'{head}{"".join(body)}</table></div>')
 
 
 CSS = f"""
 <style>
   table.mon {{
-    width: 100%; border-collapse: collapse;
-    font-variant-numeric: tabular-nums; font-size: 11.5px;
+    width: 100%; min-width:780px; border-collapse: separate; border-spacing:0;
+    font-variant-numeric: tabular-nums; font-size: 12px;
   }}
   table.mon th {{
     font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em;
@@ -193,13 +245,16 @@ CSS = f"""
     white-space: nowrap;
   }}
   table.mon td {{
-    padding: 2px 7px; text-align: right; white-space: nowrap;
+    padding: 4px 9px; text-align: right; white-space: nowrap;
     border-bottom: 1px solid rgba(255,255,255,.035);
     color: {theme.INK_2}; line-height: 1.55;
   }}
   table.mon tr:hover td {{ background: rgba(255,255,255,.035); }}
   .mon-name {{ text-align: left !important; color: {theme.INK} !important;
-               font-weight: 550; }}
+               font-weight: 550; position:sticky; left:0; z-index:1; background:{theme.PAGE}; }}
+  table.mon th.mon-name {{ z-index:2; }}
+  .mon-warning {{ color:{theme.WARNING}; font-size:10px; }}
+  .mon-session {{ display:block; font-size:8px; color:{theme.MUTED}; line-height:1.1; }}
   .mon-val  {{ color: {theme.INK} !important; font-weight: 650; }}
   .mon-unit {{ color: {theme.MUTED}; font-weight: 400; font-size: 9.5px;
                margin-left: 2px; }}
@@ -217,5 +272,18 @@ CSS = f"""
     border-bottom: 1px solid {theme.BORDER};
   }}
   tr.mon-grp:first-child td {{ padding-top: 2px; }}
+  @media (max-width:1000px) {{
+    table.mon-compact {{ min-width:0; }}
+    table.mon-compact .mon-spk, table.mon-compact .mon-rng {{ display:none; }}
+    table.mon-compact .mon-name {{ max-width:160px; white-space:normal !important; }}
+  }}
+  @media (max-width:700px) {{
+    table.mon-compact {{ min-width:0; font-size:11px; }}
+    table.mon-compact .mon-spk, table.mon-compact .mon-1w, table.mon-compact .mon-1m,
+    table.mon-compact .mon-3m, table.mon-compact .mon-rng {{ display:none; }}
+    table.mon-compact td, table.mon-compact th {{ padding:5px 4px; }}
+    .mon-name {{ max-width:145px; white-space:normal !important; }}
+    table.mon-full .mon-name {{ min-width:145px; }}
+  }}
 </style>
 """

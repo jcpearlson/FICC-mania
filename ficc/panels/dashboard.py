@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .. import analytics as an
-from .. import monitor, theme, ui
+from .. import monitor, regime, theme, ui
 from ..sources import market, mof, treasury
 from . import credit as credit_panel
 from . import overview as overview_panel
@@ -36,15 +36,18 @@ H_TALL = 230     # for the curve, which earns a little more
 
 def render(years: list[int]) -> None:
     ui.dense_css()
-    st.markdown(monitor.CSS, unsafe_allow_html=True)
-    st.markdown('<div class="ficc-dense">', unsafe_allow_html=True)
+    st.html(monitor.CSS)
 
     # Cache hits, not refetches.
-    (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg,
-     extras, move, real) = rates_panel._load(years)
-    head, ladder, yields, banks, clo, etfs, vix, defaults = credit_panel._load()
-    f, slow, mkt = overview_panel._load()
-    plumbing, cp, eur, estr, _auctions = rates_panel._load_extra()
+    with st.spinner("Loading Treasury, Japan and funding curves…"):
+        (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg,
+         extras, move, real) = rates_panel._load(years)
+    with st.spinner("Loading credit spreads and fund prices…"):
+        head, ladder, yields, banks, clo, etfs, vix, defaults = credit_panel._load()
+    with st.spinner("Loading market conditions…"):
+        f, slow, mkt = overview_panel._load()
+    with st.spinner("Loading liquidity and European rates…"):
+        plumbing, cp, eur, estr, _auctions = rates_panel._load_extra()
     # The shared overview basket has no yen, and the yen is the whole point of
     # the global block -- pull it here (cached, one symbol).
     jpy = _usdjpy()
@@ -55,8 +58,8 @@ def render(years: list[int]) -> None:
     iorb = extras.get("IORB")
 
     # ------------------------------------------------------ status strip
-    score, label, band = overview_panel.composite(
-        overview_panel._components(f, slow, mkt))
+    result = regime.analyze(f, slow, mkt)
+    score, label, band = result.score, result.label, overview_panel.regime_color(result)
 
     def _d(v, unit="bp"):
         """Level plus its 1-day change -- a level alone cannot say 'selloff'."""
@@ -66,7 +69,7 @@ def render(years: list[int]) -> None:
         return (f"<span style='font-size:10.5px;color:{c};margin-left:5px'>"
                 f"{v:+.0f}{unit}</span>")
 
-    items = [("Regime", f"{ui.fmt(score, 2, plus=True)} {label}", band)]
+    items = [("Regime", f"{ui.fmt(score, 3, plus=True)} {label}", band)]
     if ust.ok:
         items.append(("10Y", f"{ust.frame['10 Yr'].iloc[-1]:.2f}%"
                       + _d(an.pct_change_bp(ust.frame["10 Yr"], 1)), theme.INK))
@@ -88,6 +91,11 @@ def render(years: list[int]) -> None:
         items.append((f"Priced {ff.frame.index[-1]:%b%y}", f"{pr:+.0f}bp",
                       theme.RED_RATE if pr > 0 else theme.BLUE_RATE))
     ui.strip(items)
+    st.caption(f"Regime: {result.coverage:.0%} coverage"
+               + (" · partial inputs" if result.coverage < .999 else "")
+               + (" · mixed signals" if result.mixed else "")
+               + ". " + result.explanation)
+    overview_panel.regime_details(result, compact=True)
 
     # ---------------------------------------------------- monitor table
     R = monitor.row_from
@@ -174,23 +182,27 @@ def render(years: list[int]) -> None:
             if t in jgb.frame.columns:
                 global_rows.append(R(jgb, f"JGB {t}", col=t, mode="rates"))
     if long_ust and long_ust.ok and jgb.ok and "10Y" in jgb.frame.columns:
-        d = pd.concat([long_ust.col.rename("u"), jgb.frame["10Y"].rename("j")],
-                      axis=1).ffill().dropna()
-        spd = (d["u"] - d["j"]) * 100
-        global_rows.append(monitor.Row("10y UST − JGB", spd, float(spd.iloc[-1]),
-                                       unit="bp", dp=0, mode="rates",
-                                       chg_unit="pts", chg_dp=0,
-                                       as_of=min(long_ust.as_of, jgb.as_of)))
+        d = an.align_recent({"u": long_ust.col, "j": jgb.frame["10Y"]})
+        if d.empty:
+            st.caption("UST and JGB have no recent overlapping observations.")
+        else:
+            spd = (d["u"] - d["j"]) * 100
+            global_rows.append(monitor.Row("10y UST − JGB", spd, float(spd.iloc[-1]),
+                                           unit="bp", dp=0, mode="rates",
+                                           chg_unit="pts", chg_dp=0,
+                                           as_of=min(long_ust.as_of, jgb.as_of)))
     if eur.ok and "10Y" in eur.frame.columns:
         global_rows.append(R(eur, "EUR AAA 10Y", col="10Y", mode="rates"))
         if long_ust and long_ust.ok:
-            d = pd.concat([long_ust.col.rename("u"), eur.frame["10Y"].rename("e")],
-                          axis=1).ffill().dropna()
-            spd = (d["u"] - d["e"]) * 100
-            global_rows.append(monitor.Row("10y UST − EUR AAA", spd, float(spd.iloc[-1]),
-                                           unit="bp", dp=0, mode="rates",
-                                           chg_unit="pts", chg_dp=0,
-                                           as_of=min(long_ust.as_of, eur.as_of)))
+            d = an.align_recent({"u": long_ust.col, "e": eur.frame["10Y"]})
+            if d.empty:
+                st.caption("UST and EUR have no recent overlapping observations.")
+            else:
+                spd = (d["u"] - d["e"]) * 100
+                global_rows.append(monitor.Row("10y UST − EUR AAA", spd, float(spd.iloc[-1]),
+                                               unit="bp", dp=0, mode="rates",
+                                               chg_unit="pts", chg_dp=0,
+                                               as_of=min(long_ust.as_of, eur.as_of)))
     global_rows.append(R(estr, "EUR STR", mode="rates"))
     if jpy is not None and jpy.ok:
         global_rows.append(R(jpy, "USDJPY", mode="perf", unit="", dp=2, chg_unit="%"))
@@ -202,7 +214,7 @@ def render(years: list[int]) -> None:
     # the next thing any fixed-income desk looks at, and it is the group most
     # likely to be telling you something. Funding, inflation and vol are
     # context blocks; Global stays last.
-    st.markdown(monitor.render_html([
+    groups = [
         ("US Treasuries", rates_rows),
         ("Curve", curve_rows),
         ("Credit", credit_rows),
@@ -210,24 +222,58 @@ def render(years: list[int]) -> None:
         ("Inflation & term premium", infl_rows),
         ("Volatility & conditions", vol_rows),
         ("Global", global_rows),
-    ]), unsafe_allow_html=True)
-
+    ]
+    derived_inputs = {
+        "2s10s": (ust,), "5s30s": (ust,), "3m10y": (ust,), "2s5s10s fly": (ust,),
+        "SOFR − IORB": tuple(s for s in (sofr_on, iorb) if s is not None),
+        "CP A2/P2 − AA": tuple(cp.values()),
+        "CCC − BB dispersion": tuple(s for s in (ccc, bb) if s is not None),
+        "10y UST − JGB": tuple(s for s in (long_ust, jgb) if s is not None),
+        "10y UST − EUR AAA": tuple(s for s in (long_ust, eur) if s is not None),
+    }
+    for _, rows in groups:
+        for row in rows:
+            if row is not None and row.label in derived_inputs:
+                row.inputs = derived_inputs[row.label]
+    ui.quality_summary([(s, row.check_column) for _, rows in groups for row in rows
+                        if row is not None for s in row.inputs]
+                       + [(s, None) for s in (f.get("BAMLH0A0HYM2"), f.get("VIXCLS"),
+                           *slow.values(), mkt.get("^MOVE"), mkt.get("^GSPC"),
+                           mkt.get("HG=F"), mkt.get("GC=F")) if s is not None])
+    with st.expander("Find & export instruments"):
+        query = st.text_input("Find an instrument", key="monitor_query", placeholder="e.g. HY, JGB, SOFR")
+        selected_group = st.selectbox("Instrument group", ["All groups"] + [g for g, _ in groups],
+                                      key="monitor_group")
+        shown = monitor.filter_groups(groups, query, selected_group)
+        st.download_button("Download displayed instruments", monitor.to_frame(shown).to_csv(index=False),
+                           "ficc-monitor.csv", "text/csv", key="monitor_csv")
+    full = st.checkbox("Show all columns on small screens", key="monitor_full",
+                       help="Compact view keeps Last, 1D and As of visible on a phone. "
+                            "Full view scrolls horizontally; instrument names stay in place.")
+    if any(row is not None for _, rows in shown for row in rows):
+        st.markdown(monitor.render_html(shown, full=full), unsafe_allow_html=True)
+    else:
+        st.info("No instruments match. Clear the search or choose All groups.")
     st.markdown(
-        f"<div style='font-size:9.5px;color:{theme.MUTED};margin-top:6px;line-height:1.6'>"
+        '<div class="ficc-help">'
         f"One convention throughout: <span style='color:{theme.RED_RATE}'>red</span> "
         f"= the number rose, <span style='color:{theme.BLUE_RATE}'>blue</span> = it "
         "fell — for every row, and for the sparkline too. Not good/bad, because "
         "tighter spreads are only good if you are long. Changes are calendar "
-        "lookbacks (1W = seven days back), and 1D is left blank for series that "
+        "lookbacks (1W = seven days back). Rates and OAS changes are in bp; FX/DXY "
+        "changes are percent returns; other index levels use points. Hover a change "
+        "for its unit. 1D is left blank for series that "
         "do not print daily. Range is each series against its trailing three "
         "years, or less where the source serves less; "
         f"<span style='color:{theme.SERIOUS}'>amber</span> marks past the 10th/90th "
-        "percentile. 'As of' is the source's observation date, not the pull time."
+        "percentile. 'As of' is the source's observation date, not the pull time. "
+        "▲ marks a data warning; inspect the warnings above for details. "
+        "Session dates use the provider's trading calendar."
         "</div>", unsafe_allow_html=True)
 
     # ------------------------------------------------------- the charts
     ui.section("Curves", "US, Japan, and the forward path the market is pricing")
-    c1, c2 = st.columns([1.15, 1])
+    c1, c2 = ui.columns([1.15, 1])
     with c1:
         fig = go.Figure()
         if ust.ok:
@@ -244,7 +290,8 @@ def render(years: list[int]) -> None:
                                      name="SOFR fwd", mode="lines+markers",
                                      line=dict(width=2.2, color=theme.ORANGE),
                                      marker=dict(size=6),
-                                     hovertemplate="%{y:.2f}%<extra>SOFR fwd</extra>"))
+                                     customdata=pd.to_datetime(fw["observed_at"]).dt.strftime("%d %b %Y"),
+                                     hovertemplate="%{y:.2f}% · quote %{customdata}<extra>SOFR fwd</extra>"))
         if jgb.ok:
             jr = jgb.frame.iloc[-1]
             xs = [mof.TENORS[c] for c in jgb.frame.columns
@@ -267,40 +314,41 @@ def render(years: list[int]) -> None:
                                   {"1D": 1, "1W": 5, "1M": 21, "3M": 63})
             cols = [c for c in ("1D", "1W", "1M", "3M") if c in ch.columns]
             raw = ch[cols].T.values.astype(float)
-            # Normalise each row to its own scale. A single scale spanning the
-            # 3M range renders the 1D row -- the one a trader reads first --
-            # almost entirely neutral. Hover still shows true basis points.
-            norm = np.zeros_like(raw)
-            for i in range(raw.shape[0]):
-                m = np.nanmax(np.abs(raw[i])) if np.isfinite(raw[i]).any() else 0
-                norm[i] = raw[i] / m if m else 0
+            relative = st.checkbox("Scale each lookback separately", key="heatmap_relative",
+                                   help="Off: equal colours mean equal bp moves across every row. "
+                                        "On: highlight the biggest move within each lookback.")
+            limit = max(1., float(np.nanmax(np.abs(raw)))) if np.isfinite(raw).any() else 1.
+            plotted = raw.copy()
+            if relative:
+                for i in range(raw.shape[0]):
+                    m = np.nanmax(np.abs(raw[i])) if np.isfinite(raw[i]).any() else 0
+                    plotted[i] = raw[i] / m if m else raw[i]
+                limit = 1.
             labels = [t.replace("1.5 Month", "6 Wk").replace(" Mo", "m")
                        .replace(" Yr", "y") for t in ch["tenor"]]
             fig = go.Figure(go.Heatmap(
-                z=norm, x=labels, y=cols, customdata=raw,
-                colorscale=theme.DIVERGING, zmid=0, zmin=-1, zmax=1,
+                z=plotted, x=labels, y=cols,
+                customdata=[[f"{value:+.1f}" for value in row] for row in raw],
+                colorscale=theme.DIVERGING, zmid=0, zmin=-limit, zmax=limit,
+                text=[[("0" if abs(value) < .5 else f"{value:+.0f}") if np.isfinite(value) else "—" for value in row] for row in raw],
+                texttemplate="%{text}", textfont=dict(size=10),
                 xgap=1, ygap=1, showscale=False,
-                hovertemplate="%{x} · %{y}: %{customdata:+.1f} bp<extra></extra>"))
-            fig.update_layout(title="Change by tenor — each row scaled to itself",
+                hovertemplate="%{x} · %{y}: %{customdata} bp<extra></extra>"))
+            fig.update_layout(title="Change by tenor — " + ("relative within each row" if relative else "shared bp scale"),
                               yaxis=dict(autorange="reversed"),
                               xaxis=dict(tickangle=-60))
             ui.chart(fig, height=H_TALL, legend=False, unified=False, compact=True)
-            spans = " · ".join(
-                f"{c} ±{np.nanmax(np.abs(ch[c].values)):.0f}bp"
-                for c in cols if np.isfinite(ch[c].values).any())
-            st.markdown(
-                f"<div style='font-size:9.5px;color:{theme.MUTED};margin-top:-8px'>"
-                "Colour is intensity <em>within each row</em>, so a strong 1D cell "
-                "means the biggest move of that day, not a big move outright. "
-                f"Row maxima: {spans}. Hover for basis points.</div>",
-                unsafe_allow_html=True)
+            st.caption("Numbers are bp moves. " +
+                       ("Colour is relative within each row; colours do not compare magnitude across rows."
+                        if relative else f"Equal colours mean equal moves across all rows (scale ±{limit:.0f}bp).")
+                       + " Hover for one decimal place. 1W/1M/3M use 5/21/63 trading observations.")
 
     # Credit leads this section and sits on the left: the eye lands left-first
     # on a portrait screen, and unlike the Fed path -- already summarised in the
     # status strip and in three front-end table rows -- credit has no numeric
     # stand-in above.
     ui.section("Credit, policy & funding", "")
-    c1, c2 = st.columns(2)
+    c1, c2 = ui.columns(2)
     with c1:
         fig = go.Figure()
         for s_, color in ((ig, theme.BLUE), (hy, theme.ORANGE)):
@@ -331,7 +379,7 @@ def render(years: list[int]) -> None:
                 yaxis=dict(title="bp"))
             ui.chart(fig, height=H, legend=False, compact=True)
 
-    c1, c2 = st.columns(2)
+    c1, c2 = ui.columns(2)
     with c1:
         if ff.ok:
             d = ff.frame
@@ -339,7 +387,8 @@ def render(years: list[int]) -> None:
                 x=d.index, y=d["implied_rate"], mode="lines+markers",
                 line=dict(width=2, color=theme.VIOLET), marker=dict(size=5),
                 name="Implied EFFR",
-                hovertemplate="%{x|%b %Y}: %{y:.3f}%<extra></extra>"))
+                customdata=pd.to_datetime(d["observed_at"]).dt.strftime("%d %b %Y"),
+                hovertemplate="%{x|%b %Y}: %{y:.3f}% · quote %{customdata}<extra></extra>"))
             if effr.ok:
                 fig.add_hline(y=effr.latest("percentRate"),
                               line=dict(color=theme.MUTED, width=1, dash="dot"))
@@ -364,7 +413,7 @@ def render(years: list[int]) -> None:
             ui.chart(fig, height=H, legend=False, compact=True)
 
     ui.section("Carry & global linkage", "")
-    c1, c2 = st.columns([1.15, 1])
+    c1, c2 = ui.columns([1.15, 1])
     with c1:
         front = None
         if ust.ok and "3 Mo" in ust.frame.columns:
@@ -400,22 +449,23 @@ def render(years: list[int]) -> None:
             ui.chart(fig, height=H, unified=False, compact=True)
     with c2:
         if jpy is not None and jpy.ok and long_ust and long_ust.ok and jgb.ok:
-            dfb = pd.concat([jpy.col.rename("spot"), long_ust.col.rename("ust"),
-                             jgb.frame["10Y"].rename("jgb")], axis=1).ffill().dropna()
-            dfb["diff"] = (dfb["ust"] - dfb["jgb"]) * 100
-            dfb = dfb.tail(756)
-            dfb["b"] = an.rolling_beta(dfb["spot"], dfb["diff"], 250) * 100
-            fig = go.Figure(go.Scatter(x=dfb.index, y=dfb["b"], name="beta",
-                                       line=dict(width=1.8, color=theme.VIOLET),
-                                       hovertemplate="%{y:.1f} yen/100bp<extra></extra>"))
-            fig.add_hline(y=0, line=dict(color=theme.AXIS, width=1, dash="dot"))
-            fig.update_layout(
-                title=f"USDJPY beta to UST−JGB · {dfb['b'].iloc[-1]:.1f} yen/100bp",
-                yaxis=dict(title="yen/100bp"))
-            ui.chart(fig, height=H, legend=False, compact=True)
+            dfb = an.align_recent({"spot": jpy.col, "ust": long_ust.col, "jgb": jgb.frame["10Y"]})
+            if dfb.empty:
+                st.caption("USDJPY and rate curves have no recent overlapping observations.")
+            else:
+                dfb["diff"] = (dfb["ust"] - dfb["jgb"]) * 100
+                dfb = dfb.tail(756)
+                dfb["b"] = an.rolling_beta(dfb["spot"], dfb["diff"], 250) * 100
+                fig = go.Figure(go.Scatter(x=dfb.index, y=dfb["b"], name="beta",
+                                           line=dict(width=1.8, color=theme.VIOLET),
+                                           hovertemplate="%{y:.1f} yen/100bp<extra></extra>"))
+                fig.add_hline(y=0, line=dict(color=theme.AXIS, width=1, dash="dot"))
+                fig.update_layout(
+                    title=f"USDJPY beta to UST−JGB · {dfb['b'].iloc[-1]:.1f} yen/100bp",
+                    yaxis=dict(title="yen/100bp"))
+                ui.chart(fig, height=H, legend=False, compact=True)
 
     ui.sources_note([ust, jgb, sofr_fwd, hy, move, eur])
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _slope_row(ust, name: str, lo: str, hi: str):
@@ -425,6 +475,6 @@ def _slope_row(ust, name: str, lo: str, hi: str):
                        mode="rates", chg_unit="pts", chg_dp=0, as_of=ust.as_of)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _usdjpy():
     return market.quote("JPY=X", "USDJPY", period="5y")

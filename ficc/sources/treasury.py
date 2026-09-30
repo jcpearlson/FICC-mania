@@ -58,6 +58,8 @@ def curve(years: list[int], kind: str = NOMINAL, label: str = "UST par curve") -
         return failed("ust_curve", label, "US Treasury", "all years failed")
     frame = pd.concat(frames).sort_index()
     frame = frame[~frame.index.duplicated(keep="last")]
+    latest_frame = max(frames, key=lambda f: f.index.max())
+    frame.attrs[cache.FETCHED_AT] = latest_frame.attrs[cache.FETCHED_AT]
     status = worst_status(metas)
     return Series(
         key=f"ust_{kind}",

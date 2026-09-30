@@ -56,7 +56,7 @@ def test_excess_over_loss_does_not_double_count_recovery():
 def test_net_liquidity_reconciles_units():
     wed = pd.date_range("2025-01-01", periods=4, freq="W-WED")
     walcl = pd.Series(7_000_000.0, index=wed)                       # $mn
-    tga = pd.Series(800.0, index=wed)                                # $bn
+    tga = pd.Series(800_000.0, index=wed)                            # $mn (WTREGEN)
     rrp = pd.Series(200.0, index=pd.bdate_range(wed[0], wed[-1]))    # $bn, daily
     nl = an.net_liquidity(walcl, tga, rrp)
     assert list(nl.index) == list(wed)
@@ -69,3 +69,12 @@ def test_common_base_index_uses_shared_start():
     idx = an.common_base_index({"a": a, "b": b})
     assert idx.index[0] == a.index[2]
     assert (idx.iloc[0] == 100).all()
+
+
+def test_cross_market_alignment_does_not_extend_stopped_sources():
+    old = pd.Series([1., 2.], index=pd.to_datetime(['2026-01-01', '2026-01-02']))
+    active = pd.Series(range(16), index=pd.date_range('2026-01-01', periods=16), dtype=float)
+    aligned = an.align_recent({'old': old, 'active': active})
+    assert aligned.index[-1] == pd.Timestamp('2026-01-09')
+    assert aligned['old'].iloc[-1] == 2.
+    assert an.align_recent({'old': old, 'new': active.loc['2026-01-12':]}).empty

@@ -5,7 +5,7 @@ Run it:   uv run streamlit run app.py
 Every number on the page comes from a free, public, keyless source. Nothing
 here requires a terminal subscription, a vendor login, or a paid API. Each
 tile carries the observation date its source stamped on the data; the pull
-time is in the header.
+times are preserved with each cached payload.
 """
 
 from __future__ import annotations
@@ -35,52 +35,50 @@ CURVE_YEARS = list(range(dt.date.today().year - 2, dt.date.today().year + 1))
 
 
 def header() -> None:
-    left, right = st.columns([3, 1.15])
-    with left:
-        st.markdown(
-            '<p class="ficc-hdr-title">FICC Mania</p>'
-            '<p class="ficc-hdr-sub">Free, public, keyless data · every figure '
-            'stamped with its source\'s own observation date.</p>',
-            unsafe_allow_html=True)
-    with right:
-        pulled = dt.datetime.now().astimezone()
-        st.markdown(
-            f'<div style="text-align:right;padding-top:6px">'
-            f'<div style="font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;'
-            f'color:{theme.MUTED};font-weight:600">Data pulled</div>'
-            f'<div style="font-size:15px;color:{theme.INK};font-variant-numeric:tabular-nums">'
-            f'{pulled:%H:%M:%S %Z}</div>'
-            f'<div style="font-size:11px;color:{theme.MUTED}">{pulled:%A %d %B %Y}</div>'
-            f'</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        if c1.button("Refresh", width="stretch"):
+    rendered = dt.datetime.now().astimezone()
+    st.markdown(
+        '<div class="ficc-masthead"><div><div class="ficc-eyebrow">The FICC monitor</div>'
+        '<p class="ficc-wordmark">FICC Mania</p>'
+        '<p class="ficc-hdr-sub">Rates, credit &amp; market conditions · public data, '
+        'with source dates and risk context.</p></div>'
+        '<div class="ficc-clock"><div class="label">Page rendered</div>'
+        f'<div class="time">{rendered:%H:%M:%S %Z}</div>'
+        f'<div class="date">{rendered:%a %d %b %Y}</div></div></div>',
+        unsafe_allow_html=True)
+    with st.container(horizontal=True):
+        if st.button("Refresh", help="Reload the page using available data. Disk cache is retained until its source TTL expires."):
             st.cache_data.clear()
-            st.rerun()
-        if c2.button("Clear cache", width="stretch",
-                     help="Drop the on-disk cache and re-pull every source from scratch"):
+        if st.button("Clear cache", help="Delete cached data and request fresh source data for the open tab"):
             n = cache.clear()
             st.cache_data.clear()
             st.toast(f"Cleared {n} cached payloads")
-            st.rerun()
 
 
 def main() -> None:
     header()
-    tabs = st.tabs(["  Dashboard  ", "  Market health  ", "  Rates & curves  ",
-                    "  Credit, CLOs & loans  ", "  FX & commodities  ", "  Sources  "])
-
-    with tabs[0]:
-        dashboard.render(CURVE_YEARS)
-    with tabs[1]:
-        overview.render()
-    with tabs[2]:
-        rates.render(CURVE_YEARS)
-    with tabs[3]:
-        credit.render()
-    with tabs[4]:
-        fxcommods.render()
-    with tabs[5]:
-        sources_tab()
+    names = ["Dashboard", "Market health", "Rates & curves",
+             "Credit, CLOs & loans", "FX & commodities", "Sources"]
+    def switch_page():
+        st.session_state.page = st.session_state.page_picker
+        st.session_state._active_page = st.session_state.page_picker
+    def remember_page():
+        st.session_state._active_page = st.session_state.page
+    # Keep navigation separately from widget state, which Streamlit may clean
+    # up across refreshes and when the active panel's widgets disappear.
+    if "_active_page" not in st.session_state:
+        st.session_state._active_page = st.session_state.get("page", names[0])
+    st.session_state.page = st.session_state._active_page
+    st.session_state.page_picker = st.session_state._active_page
+    with st.container(key="ficc-phone-nav"):
+        st.selectbox("Page", names, key="page_picker", on_change=switch_page,
+                     label_visibility="collapsed")
+    tabs = st.tabs(names, key="page", on_change=remember_page)
+    renderers = [lambda: dashboard.render(CURVE_YEARS), overview.render,
+                 lambda: rates.render(CURVE_YEARS), credit.render, fxcommods.render, sources_tab]
+    for i, (tab, render) in enumerate(zip(tabs, renderers)):
+        if tab.open:
+            with tab, st.container(key=f"ficc-view-{i}"), st.spinner(f"Loading {names[i]}…"):
+                render()
 
 
 def sources_tab() -> None:
@@ -139,8 +137,13 @@ See <code>BACKLOG.md</code>.
 <div style="font-size:12.5px;color:{theme.INK_2};line-height:1.75;max-width:1000px">
 Two timestamps are tracked separately for every series, because conflating them
 would make the dashboard lie. <b>Observation date</b> is the date the source itself
-stamps on the data — that is what each tile's badge shows. <b>Pull time</b> is when
-this app fetched it, shown once in the header. A tile reading
+stamps on the data — that is what each tile's badge shows. <b>Pull time</b> is the last
+successful source request, preserved across disk-cache hits and shown in source notes
+and badge tooltips. The header says <b>Page rendered</b>, which is separate. Refresh
+reloads available data and retains the disk cache; Clear cache requests fresh data
+for the open tab. FX session dates use the provider's trading calendar and are labelled
+as sessions; unexplained future observations are flagged. Futures show the oldest
+contract quote date, with mixed quote dates flagged in data quality. A tile reading
 <span class="ficc-badge" style="color:{theme.GOOD};border-color:{theme.GOOD}33">● today</span>
 was observed today; one reading
 <span class="ficc-badge" style="color:{theme.WARNING};border-color:{theme.WARNING}33">▲ 6d ago</span>
@@ -152,15 +155,17 @@ so a single failed fetch never blanks the page.
 
 
 def _quality_table() -> None:
-    """Every loaded series run through ficc.quality. All loaders are cache hits."""
+    """Audit all sources, loading unvisited panels through the shared cache."""
     from ficc.panels import credit as cr, fxcommods as fx, overview as ov, rates as rt
 
-    (ust, jgb, _sfwd, _ff, sofr_on, effr, _savg, extras, move, real) = rt._load(CURVE_YEARS)
+    (ust, jgb, sfwd, ff, sofr_on, effr, _savg, extras, move, real) = rt._load(CURVE_YEARS)
     plumbing, cp, eur, estr, auctions = rt._load_extra()
     head, ladder, yields, banks, clo, etfs, vix, defaults = cr._load()
-    fxb, metals, energy, ags, vols, _w, _n, _r, _u, _j = fx._load()
+    fxb, metals, energy, ags, vols, w, n, r, _u, _j = fx._load()
     f, slow, mkt = ov._load()
-    items = [(ust, "10 Yr"), (real, None), (jgb, "10Y"), (sofr_on, "percentRate"),
+    items = [(sfwd, "implied_rate"), (ff, "implied_rate"), (w, "price"),
+             (n, "price"), (r, None),
+             (ust, "10 Yr"), (real, None), (jgb, "10Y"), (sofr_on, "percentRate"),
              (effr, "percentRate"), (move, None), (eur, "10Y"), (estr, None),
              (auctions, "btc"),
              *[(s, None) for s in (*extras.values(), *plumbing.values(), *cp.values(),
@@ -176,6 +181,11 @@ def _quality_table() -> None:
             seen.add((s.source, s.key))
             uniq.append((s, col))
     reports = quality.assess_many(uniq)
+    pulls = {(s.source, quality.check_label(s, col)):
+             f"{s.fetched_at.astimezone():%d %b %H:%M %Z}" if s.ok else "—"
+             for s, col in uniq}
+    sessions = {(s.source, quality.check_label(s, col))
+                for s, col in uniq if s.date_basis == "session"}
     n_bad = sum(r.worst != "ok" for r in reports)
     ui.section("Data quality", f"{len(reports)} series checked · {n_bad} flagged — "
                "staleness, flatlines, outsized jumps, gaps and short history")
@@ -183,7 +193,9 @@ def _quality_table() -> None:
     rows = "".join(
         f"<tr><td style='color:{colour[r.worst]}'>{theme.STATUS_ICONS.get(r.status, '●')}</td>"
         f"<td>{ui.esc(r.label)}</td><td>{ui.esc(r.source)}</td>"
-        f"<td style='text-align:right'>{f'{r.as_of:%d %b %Y}' if r.as_of else '—'}</td>"
+        f"<td style='text-align:right'>{f'{r.as_of:%d %b %Y}' if r.as_of else '—'}"
+        f"{' · session' if (r.source, r.label) in sessions else ''}</td>"
+        f"<td style='text-align:right'>{pulls[r.source, r.label]}</td>"
         f"<td style='text-align:right'>{r.n_obs:,}</td>"
         f"<td style='text-align:right'>{r.span_years:.1f}y</td>"
         f"<td style='text-align:left;color:{colour[r.worst] if r.flags else theme.MUTED}'>"
@@ -192,7 +204,7 @@ def _quality_table() -> None:
     with st.expander(f"Per-series checks ({n_bad} flagged)", expanded=n_bad > 0):
         st.markdown(
             '<table class="ficc-tbl"><tr><th></th><th style="text-align:left">Series</th>'
-            '<th style="text-align:left">Source</th><th>As of</th><th>Obs</th><th>Span</th>'
+            '<th style="text-align:left">Source</th><th>As of</th><th>Last pull</th><th>Obs</th><th>Span</th>'
             f'<th style="text-align:left">Flags</th></tr>{rows}</table>',
             unsafe_allow_html=True)
 

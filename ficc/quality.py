@@ -55,22 +55,42 @@ def _numeric_col(s: Series, column: str | None) -> pd.Series:
     return num.iloc[:, 0].dropna() if num.shape[1] else pd.Series(dtype=float)
 
 
+def check_label(s: Series, column: str | None = None) -> str:
+    return f"{s.label} · {column}" if column else s.label
+
+
 def assess(s: Series, column: str | None = None, *,
            flat_obs: int = 7, jump_sigma: float = 8.0,
            min_years: float = 1.0) -> Report:
     """Run every check on one series (optionally one column of a wide frame)."""
+    label = check_label(s, column)
     freshness = s.freshness.value
     lag = s.lag_days()
     if not s.ok:
-        return Report(s.label, s.source, "failed", None, None, s.cadence_days, 0, 0.0,
+        return Report(label, s.source, "failed", None, None, s.cadence_days, 0, 0.0,
                       [s.note or "fetch failed"])
     col = _numeric_col(s, column)
     n = len(col)
     span = (col.index[-1] - col.index[0]).days / 365.25 if n > 1 else 0.0
     flags: list[str] = []
 
+    if lag is not None and lag < 0 and not (s.date_basis == "session" and lag == -1):
+        flags.append(f"future observation date: {-lag}d ahead of local calendar")
+
     if freshness == Status.STALE.value and lag is not None:
-        flags.append(f"stale: {lag}d old vs {s.cadence_days:g}d cadence")
+        if s.status is Status.STALE:
+            flags.append("source unavailable; serving last good cache")
+        if lag > s.cadence_days + 3:
+            flags.append(f"stale: {lag}d old vs {s.cadence_days:g}d cadence")
+
+    if s.date_basis == "curve":
+        # The index holds delivery dates, not price history. Inspect each
+        # contract's quote date instead of treating maturities as daily data.
+        observed = pd.to_datetime(s.frame["observed_at"])
+        if observed.nunique() > 1:
+            flags.append(f"mixed quote dates: {observed.min():%d %b}–{observed.max():%d %b}")
+        return Report(label, s.source, freshness, s.as_of, lag, s.cadence_days,
+                      n, 0.0, flags)
 
     # Flatline only for market prices. Administered and reference rates
     # (IORB, EFFR) legitimately sit unchanged for weeks; a traded price that
@@ -98,7 +118,7 @@ def assess(s: Series, column: str | None = None, *,
     if span < min_years and s.cadence_days <= 7:
         flags.append(f"short history ({span * 12:.0f}m)")
 
-    return Report(s.label, s.source, freshness, s.as_of, lag, s.cadence_days,
+    return Report(label, s.source, freshness, s.as_of, lag, s.cadence_days,
                   n, span, flags)
 
 

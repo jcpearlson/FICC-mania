@@ -60,6 +60,8 @@ def curve(with_history: bool = True) -> Series:
         return failed("jgb", "JGB curve", "MOF Japan", "no MOF file reachable")
     frame = pd.concat(frames).sort_index()
     frame = frame[~frame.index.duplicated(keep="last")]
+    latest_frame = max(frames, key=lambda f: f.index.max())
+    frame.attrs[cache.FETCHED_AT] = latest_frame.attrs[cache.FETCHED_AT]
     return Series(
         key="jgb", label="JGB par curve", frame=frame,
         source="MOF Japan", unit="%", cadence_days=1,

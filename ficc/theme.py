@@ -25,7 +25,7 @@ BORDER = "rgba(255,255,255,0.10)"
 # -- ink -----------------------------------------------------------------
 INK = "#EEF1F7"
 INK_2 = "#A9B2C4"
-MUTED = "#78839A"
+MUTED = "#93A0B5"
 GRID = "#232B39"
 AXIS = "#333D4F"
 
@@ -58,7 +58,7 @@ BLUE_RATE = "#5598e7"
 STATUS_COLORS = {"ok": GOOD, "cached": INK_2, "stale": WARNING, "failed": CRITICAL}
 STATUS_ICONS = {"ok": "●", "cached": "◐", "stale": "▲", "failed": "✕"}
 
-FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+FONT = '"Avenir Next", "Trebuchet MS", sans-serif'
 
 
 def register() -> None:
@@ -100,11 +100,6 @@ def register() -> None:
 
 
 # Vertical budget, in px, for the band above the plot area.
-_TITLE_BAND = 34        # title text plus its padding
-_LEGEND_ROW = 20        # one row of horizontal legend
-_LEGEND_GAP = 12        # breathing room between title and legend
-_NO_LEGEND_PAD = 16     # slack above the plot when there is no legend
-
 
 def _legend_rows(fig: go.Figure, chars_per_row: int = 78) -> int:
     """Estimate how many rows a horizontal legend will wrap onto.
@@ -127,39 +122,28 @@ def apply(fig: go.Figure, *, height: int = 300, legend: bool = True,
           unified: bool = True, compact: bool = False) -> go.Figure:
     """Final pass every figure goes through before st.plotly_chart.
 
-    Sizes the top margin to the content: the title always needs its band, and
-    each wrapped legend row needs another. A fixed margin either wastes space
-    on single-series charts or lets a two-row legend run into the title.
+    Sizes the legend band conservatively for narrow charts. Titles are wrapping
+    HTML captions outside the figure, so legends cannot collide with them.
     """
-    # Compact mode: terminal density. Smaller title and ticks, tighter margins,
-    # and the legend folded onto the title row where it fits, so a small
-    # multiple spends its pixels on data rather than on chrome.
-    rows = _legend_rows(fig, chars_per_row=52 if compact else 78) if legend else 0
-    if compact:
-        # 30px, not 22: the title sits at the container top with its own pad,
-        # so too small a band lets the legend ride back up into it -- the exact
-        # collision the standard mode was fixed for.
-        title_band, legend_row, gap, slack = 30, 15, 7, 8
-    else:
-        title_band, legend_row, gap, slack = (
-            _TITLE_BAND, _LEGEND_ROW, _LEGEND_GAP, _NO_LEGEND_PAD)
-    top = title_band + (gap + rows * legend_row if rows else slack)
+    # Titles live in wrapping HTML captions. Budget the legend for the
+    # narrowest chart (one column on a phone), not a desktop-only width.
+    rows = _legend_rows(fig, chars_per_row=32) if legend else 0
+    top = 12 + rows * (20 if compact else 22)
 
     if compact:
         fig.update_layout(
-            title_font_size=11.5,
-            font_size=10,
-            title=dict(pad=dict(t=7, b=0)),
-            legend=dict(font=dict(size=9.5), y=1.04),
-            xaxis=dict(tickfont=dict(size=9)),
-            yaxis=dict(tickfont=dict(size=9)),
+            font_size=11,
+            legend=dict(font=dict(size=10), y=1.02, yanchor="bottom"),
+            xaxis=dict(tickfont=dict(size=10)),
+            yaxis=dict(tickfont=dict(size=10)),
             margin=dict(l=40, r=10, t=top, b=26),
         )
     else:
-        fig.update_layout(margin=dict(l=54, r=18, t=top, b=40))
+        fig.update_layout(margin=dict(l=48, r=16, t=top, b=40),
+                          legend=dict(y=1.02, yanchor="bottom"))
 
     fig.update_layout(
-        height=height + max(0, top - (36 if compact else 50)),
+        height=height + max(0, top - 12),
         showlegend=legend and rows > 0,
         hovermode="x unified" if unified else "closest",
     )

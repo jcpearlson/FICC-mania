@@ -32,12 +32,17 @@ It leads with a **monitor table**: ~38 instruments grouped Treasuries → curve
 slopes → credit → front end and funding → inflation and term premium → vol →
 Global (Japan, euro area, FX), each row carrying level, 1D/1W/1M/3M change, a
 position-in-3y-range marker, its percentile, a 3-year sparkline and the
-source's observation date. Changes are **calendar** lookbacks (1W is seven days
+source's observation date. On phones, the compact table prioritizes Last, 1D
+and source dates, with all columns available through
+an explicit horizontal scroll mode. Data-quality warnings travel with each row. Changes are **calendar** lookbacks (1W is seven days
 back, whatever the series' cadence), and 1D is blank for series that do not
 print daily. That is a
 deliberate trade: six stat tiles occupy the same vertical space as thirty table
 rows and carry a fifth of the information, and on a glance page the number of
 instruments visible before you scroll *is* the product.
+
+The monitor also has instrument search, group filtering and a CSV export with explicit units.
+The tenor heatmap defaults to a shared bp scale; relative row scaling is optional.
 
 The table uses **one directional convention throughout** — red means the number
 rose, blue means it fell, for every row and for the sparkline. Not good/bad:
@@ -50,25 +55,28 @@ Plotly figures would be slow and enormous; thirty inline SVGs are a few
 kilobytes and render instantly.
 
 Below the table, eight charts as small multiples two across at ~190px, in
-compact mode (smaller type, tighter margins, legend folded onto the title row).
+compact mode (smaller type, tighter margins, wrapping captions above a separate legend band).
 Once the table has told you *what* moved, a chart only needs to show *shape*:
 the curve, the policy path, IG/HY, CCC−BB dispersion, SOFR−IORB, carry and
 roll-down, and the USDJPY beta to UST−JGB.
 
 Ordering is the design — the further down something sits, the less often it
 changes the answer to "how is fixed income doing right now". The page reuses
-the other tabs' cached loaders, so opening it costs no extra network calls.
+the other tabs' cached loaders. Tabs load only when opened, with visible source-group loading feedback.
 
 **Market health** — a five-component cross-asset risk regime score (credit, vol,
-funding, growth, trend), each component visible next to the headline so the score
-can be taken apart rather than trusted blindly. Underneath, a divergence table:
-the pairs where the composite is averaging away a disagreement worth looking at.
+financial conditions, growth proxy, equity trend). This is a descriptive heuristic,
+not a calibrated forecast. It shows actual weighted contributions, input dates,
+coverage, exclusions, effective weights, an exportable calculation table and a
+trailing reconstruction. Daily inputs expire after 4 days, weekly after 10; at least
+80% intended weight plus credit and volatility are required. Full methodology and
+review: [REGIME_REVIEW.md](REGIME_REVIEW.md). Relative-positioning comparisons sit below.
 
 **Rates & curves** — the UST nominal and real curves, the JGB curve, and a genuine
 **forward SOFR curve** built from CME SR3 futures, on one chart. Per-tenor change
 heatmap, the Fed policy path implied by fed funds futures, overnight funding
 (SOFR vs EFFR with its percentile band), the 10y UST−JGB spread, a decomposition
-of the 10y into real yield / breakevens / term premium, reserve scarcity via
+of the 10y into real yield / breakevens / term premium, funding pressure via
 SOFR−IORB, and **carry, roll-down and the breakeven selloff** for every tenor.
 The curve chart also carries the ECB's euro AAA curve and a month-ago UST
 ghost. Below: **liquidity and plumbing** (Fed balance sheet net of TGA and RRP,
@@ -79,11 +87,11 @@ auctions).
 **Credit, CLOs & loans** — IG, HY, EM and Euro HY option-adjusted spreads with
 percentile context; the full AAA→CCC ratings ladder; the CCC−BB quality spread
 as a dispersion signal; CLO and leveraged-loan total-return proxies; bank lending
-standards from SLOOS; and the risk-premium read — the default rate the spread
-implies versus what is actually defaulting.
+standards from SLOOS; spread-implied default equivalents under a recovery
+assumption; a separate bank-loss comparison; and OAS as a share of yield.
 
-**FX & commodities** — the dollar and the G10/EM complex; USDJPY against its
-rate-implied fair value with the residual *and the rolling beta*; gold against
+**FX & commodities** — the dollar and the G10/EM complex; USDJPY against
+a retrospectively fitted rate relationship with its residual *and rolling beta*; gold against
 real yields; copper/gold against 10y yields; energy forward curves with a
 contango/backwardation metric; gold/silver; a commodity performance grid; and
 **CFTC positioning**, i.e. leveraged-fund net in yen and euro futures as a share of
@@ -110,8 +118,12 @@ Conflating them makes the dashboard lie. FRED's USDJPY series can be six days
 stale while treasury.gov has already published today's curve — a tile reading
 "updated 4 seconds ago" over a six-day-old print is worse than no timestamp at
 all. So each tile badges its **observation date** and turns amber when that date
-falls behind the series' expected cadence; the pull time appears once, in the
-header.
+falls behind the series' expected cadence. Actual successful pull times survive
+disk-cache hits and appear in badge tooltips and source notes. The header shows
+**Page rendered**. Refresh clears the memory cache while retaining the disk cache;
+Clear cache requests fresh data for the open tab. FX dates are labelled as source
+sessions; unexplained future dates are flagged. Futures retain each contract’s
+quote date, with the oldest date used for freshness and mixed dates flagged.
 
 ## Honest history windows
 
@@ -171,7 +183,7 @@ tests/
 ### Tests
 
 ```bash
-uv run --group dev pytest      # 31 tests, no network needed
+uv run --group dev pytest      # offline source and app regression tests
 uv run --group dev ruff check .
 ```
 
