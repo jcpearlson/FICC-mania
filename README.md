@@ -69,8 +69,8 @@ financial conditions, growth proxy, equity trend). This is a descriptive heurist
 not a calibrated forecast. It shows actual weighted contributions, input dates,
 coverage, exclusions, effective weights, an exportable calculation table and a
 trailing reconstruction. Daily inputs expire after 4 days, weekly after 10; at least
-80% intended weight plus credit and volatility are required. Full methodology and
-review: [REGIME_REVIEW.md](REGIME_REVIEW.md). Relative-positioning comparisons sit below.
+80% intended weight plus credit and volatility are required. The expandable methods
+section explains the calculation and its limits. Relative-positioning comparisons sit below.
 
 **Rates & curves** — the UST nominal and real curves, the JGB curve, and a genuine
 **forward SOFR curve** built from CME SR3 futures, on one chart. Per-tenor change
@@ -247,8 +247,8 @@ pasted headers usually carry session cookies.
 | TreasuryDirect | Coupon auction results | Same day as auction |
 | CFTC (Socrata) | Traders in Financial Futures positioning | Weekly (Fri, for Tue) |
 
-See `BACKLOG.md` for what is blocked, what is licensed, and what is deliberately
-left out, and `AUDIT.md` for the most recent source and data-quality audit.
+The Sources tab lists deliberate omissions and source limitations, and reports
+data-quality checks for the loaded series.
 
 ## Data terms — read before you fork or redistribute
 

@@ -292,7 +292,7 @@ def render() -> None:
         st.markdown(
             f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
             "CBOE FX vol indices (EVZ, JYVIX, BPVIX) are not retrievable through "
-            "this data path — see BACKLOG.md.</div>", unsafe_allow_html=True)
+            "this data path.</div>", unsafe_allow_html=True)
 
     ui.failures_note([*fx.values(), *metals.values(), *energy.values(), *vols.values()])
     ui.sources_note([*metals.values(), real, jgb])

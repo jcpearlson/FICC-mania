@@ -4,3 +4,15 @@ __pycache__/
 .cache/
 .DS_Store
 headers.local.json
+
+# Local development configuration and working notes
+.agents/
+.claude/
+.codex/
+.cursor/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+/AUDIT.md
+/BACKLOG.md
+/REGIME_REVIEW.md

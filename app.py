@@ -115,7 +115,7 @@ def sources_tab() -> None:
 <div style="font-size:12.5px;color:{theme.INK_2};line-height:1.75;max-width:1000px">
 <b>Cross-currency basis.</b> The basis swap is OTC and the quoted series are licensed.
 No free source exists. Rather than ship a mislabelled proxy, it is absent — the Fed
-swap-line series (<code>SWPT</code>) is tracked in the backlog as a <em>funding-stress</em>
+swap-line series (<code>SWPT</code>) would be a <em>funding-stress</em>
 signal, which is a consequence of basis widening, not the basis itself.<br>
 <b>CLO tranche spreads.</b> Primary AAA discount margins and tranche spread curves are
 licensed products. The listed CLO ETFs JAAA and JBBB stand in (total return, so
@@ -126,7 +126,6 @@ BKLN is the free stand-in.<br>
 Sector and equal-weight relative performance is the closest free substitute, and is
 labelled as such.<br>
 <b>CBOE FX vol indices.</b> EVZ, JYVIX and BPVIX do not resolve through this data path.
-See <code>BACKLOG.md</code>.
 </div>
 """, unsafe_allow_html=True)
 
