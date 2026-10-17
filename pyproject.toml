@@ -24,7 +24,6 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]
 line-length = 100
@@ -32,4 +31,6 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "I"]
-ignore = ["E501", "B008", "B023", "B905", "I001", "E702"]
+# Chart labels and HTML strings can exceed the line limit; paired plotting
+# sequences intentionally truncate to the shorter input.
+ignore = ["E501", "B905"]

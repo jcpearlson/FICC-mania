@@ -1,9 +1,4 @@
-"""Reusable Streamlit pieces: stat tiles, freshness badges, section chrome.
-
-The freshness badge is the heart of it. Every tile shows the source's own
-observation date (`as_of`), not our pull time, and turns amber when that date
-trails the series' expected cadence. Actual pull times live with the payload.
-"""
+"""Streamlit components for charts, tiles, freshness badges and source notes."""
 
 from __future__ import annotations
 
@@ -148,6 +143,7 @@ def columns(spec):
 
 # -- freshness -----------------------------------------------------------
 
+
 def badge_html(s: Series) -> str:
     """Freshness pill: the source's observation date, colored by staleness."""
     status = s.freshness.value
@@ -158,7 +154,9 @@ def badge_html(s: Series) -> str:
     else:
         lag = s.lag_days()
         if s.date_basis == "session":
-            text = "source session" + (f" ({s.observation_timezone})" if s.observation_timezone else "")
+            text = "source session" + (
+                f" ({s.observation_timezone})" if s.observation_timezone else ""
+            )
         elif lag is not None and lag < 0:
             text = f"future date · {-lag}d ahead"
             color, icon = theme.WARNING, "▲"
@@ -171,23 +169,21 @@ def badge_html(s: Series) -> str:
         text = f"{s.as_of:%d %b} · {text}"
     if status == "failed":
         text = "unavailable"
-    details = (f"{s.source} · pulled {stamp(s.fetched_at)}" if s.ok
-               else f"{s.source} · no successful data pull")
+    details = (
+        f"{s.source} · pulled {stamp(s.fetched_at)}"
+        if s.ok
+        else f"{s.source} · no successful data pull"
+    )
     if s.note:
         details += f" · {s.note}"
-    return (f'<span class="ficc-badge" title="{esc(details)}" '
-            f'style="color:{color};border-color:{color}33">{icon} {esc(text)}</span>')
+    return (
+        f'<span class="ficc-badge" title="{esc(details)}" '
+        f'style="color:{color};border-color:{color}33">{icon} {esc(text)}</span>'
+    )
 
 
 def esc(v: object) -> str:
-    """Escape a value before it goes into an `unsafe_allow_html` block.
-
-    Every label in this app is currently a hardcoded constant, so nothing here
-    is exploitable today. That is a property of the current call sites, not of
-    the rendering code -- the moment a label, source name or error string comes
-    from a fetched payload, an unescaped f-string becomes an injection. Escaping
-    at the boundary means that change stays safe by default.
-    """
+    """Escape text and attribute values before inserting them into HTML."""
     return _html.escape(str(v), quote=True)
 
 
@@ -199,10 +195,20 @@ def fmt(v: float | None, dp: int = 2, plus: bool = False) -> str:
 
 # -- tiles ---------------------------------------------------------------
 
-def tile(label: str, value: float | None, s: Series | None = None, *,
-         unit: str = "", dp: int = 2, delta: float | None = None,
-         delta_unit: str = "bp", invert: bool = False, sub: str = "",
-         mode: str = "perf") -> str:
+
+def tile(
+    label: str,
+    value: float | None,
+    s: Series | None = None,
+    *,
+    unit: str = "",
+    dp: int = 2,
+    delta: float | None = None,
+    delta_unit: str = "bp",
+    invert: bool = False,
+    sub: str = "",
+    mode: str = "perf",
+) -> str:
     """One stat tile as HTML.
 
     `mode` picks the delta convention: "perf" (up is good), "risk" (up is bad --
@@ -214,13 +220,15 @@ def tile(label: str, value: float | None, s: Series | None = None, *,
         '<div class="ficc-card">',
         f'<p class="ficc-tile-label">{esc(label)}</p>',
         f'<p class="ficc-tile-value">{val}'
-        f'{f"<span class=ficc-tile-unit>{unit}</span>" if unit else ""}</p>',
+        f"{f'<span class=ficc-tile-unit>{esc(unit)}</span>' if unit else ''}</p>",
     ]
     if delta is not None and delta == delta:
         c = theme.delta_color(delta, invert, mode)
         arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "■")
-        parts.append(f'<div class="ficc-tile-delta" style="color:{c}">'
-                     f'{arrow} {fmt(abs(delta), 1)} {delta_unit} 1d</div>')
+        parts.append(
+            f'<div class="ficc-tile-delta" style="color:{c}">'
+            f"{arrow} {fmt(abs(delta), 1)} {esc(delta_unit)} 1d</div>"
+        )
     if sub:
         parts.append(f'<div class="ficc-tile-sub">{sub}</div>')
     if s is not None:
@@ -236,7 +244,7 @@ def tile_row(tiles: list[str]) -> None:
 
 def section(title: str, note: str = "") -> None:
     st.markdown(
-        f'<div class="ficc-section"><h2>{esc(title)}</h2>'        f'<span>{esc(note)}</span></div>',
+        f'<div class="ficc-section"><h2>{esc(title)}</h2><span>{esc(note)}</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -249,17 +257,32 @@ def sources_note(series: list[Series]) -> None:
             seen.setdefault(s.source, []).append(s)
     bits = []
     for src, group in seen.items():
-        dates = sorted({date for s in group for date in
-                        (pd.to_datetime(s.frame["observed_at"]).dt.date if s.date_basis == "curve"
-                         else [s.as_of]) if date})
-        observed = (f"{dates[0]:%d %b %Y}" if len(dates) == 1 else
-                    f"{dates[0]:%d %b}–{dates[-1]:%d %b %Y}" if dates else "unavailable")
+        dates = sorted(
+            {
+                date
+                for s in group
+                for date in (
+                    pd.to_datetime(s.frame["observed_at"]).dt.date
+                    if s.date_basis == "curve"
+                    else [s.as_of]
+                )
+                if date
+            }
+        )
+        observed = (
+            f"{dates[0]:%d %b %Y}"
+            if len(dates) == 1
+            else f"{dates[0]:%d %b}–{dates[-1]:%d %b %Y}"
+            if dates
+            else "unavailable"
+        )
         pulled = min(s.fetched_at for s in group)
         bits.append(f"{esc(src)} · observations {observed} · earliest pull {stamp(pulled)}")
     if bits:
         st.markdown(
-            '<div class="ficc-provenance">'
-            f'Sources: {"  |  ".join(bits)}</div>', unsafe_allow_html=True)
+            f'<div class="ficc-provenance">Sources: {"  |  ".join(bits)}</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def failures_note(series: list[Series]) -> None:
@@ -268,7 +291,9 @@ def failures_note(series: list[Series]) -> None:
         names = ", ".join(esc(s.label) for s in bad[:6])
         st.markdown(
             f'<div style="font-size:11px;color:{theme.WARNING};margin-top:6px">'
-            f'▲ Unavailable this pull: {names}</div>', unsafe_allow_html=True)
+            f"▲ Unavailable this pull: {names}</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def chart(fig, **kw) -> None:
@@ -284,11 +309,13 @@ def chart(fig, **kw) -> None:
         # Chart captions wrap in the document; SVG titles do not. Retain the
         # caption in figure metadata for exports and accessibility tooling.
         caption = re.sub(r"<[^>]+>", "", _html.unescape(title))
-        st.markdown(f'<div class="ficc-chart-heading">{esc(caption)}</div>',
-                    unsafe_allow_html=True)
+        st.markdown(f'<div class="ficc-chart-heading">{esc(caption)}</div>', unsafe_allow_html=True)
         fig.update_layout(title_text="", meta={"caption": caption})
-    st.plotly_chart(theme.apply(fig, **kw), width="stretch",
-                    config={"displayModeBar": False, "scrollZoom": False})
+    st.plotly_chart(
+        theme.apply(fig, **kw),
+        width="stretch",
+        config={"displayModeBar": False, "scrollZoom": False},
+    )
 
 
 def quality_summary(items: list[tuple[Series | None, str | None]]) -> None:
@@ -302,13 +329,16 @@ def quality_summary(items: list[tuple[Series | None, str | None]]) -> None:
     if bad:
         st.markdown(
             f'<div class="ficc-quality"><strong>▲ {len(bad)} data warnings</strong>'
-            f'<span>{len(reports)} series checked · observation dates and history</span></div>',
-            unsafe_allow_html=True)
+            f"<span>{len(reports)} series checked · observation dates and history</span></div>",
+            unsafe_allow_html=True,
+        )
         with st.expander("Inspect data warnings"):
             for r in bad:
                 flags = "; ".join(r.flags) or r.status
-                st.markdown(f'<div class="ficc-quality-details"><b>{esc(r.label)}</b>'
-                            f' · {esc(flags)}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="ficc-quality-details"><b>{esc(r.label)}</b> · {esc(flags)}</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 DENSE_CSS = f"""
@@ -343,10 +373,10 @@ def strip(items: list[tuple[str, str, str]]) -> None:
     """A one-line status strip: (label, value, color) triples."""
     bits = []
     for k, v, c in items:
-        bits.append(f'<div><span class="k">{k}</span>'
-                    f'<span class="v" style="color:{c}">{v}</span></div>')
-    st.markdown(f'<div class="ficc-strip">{"".join(bits)}</div>',
-                unsafe_allow_html=True)
+        bits.append(
+            f'<div><span class="k">{k}</span><span class="v" style="color:{c}">{v}</span></div>'
+        )
+    st.markdown(f'<div class="ficc-strip">{"".join(bits)}</div>', unsafe_allow_html=True)
 
 
 def stamp(fetched: dt.datetime) -> str:

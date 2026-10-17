@@ -1,11 +1,4 @@
-"""Inline SVG sparklines and range bars for dense monitor tables.
-
-A terminal-style monitor needs 25+ instruments visible at once. Twenty-five
-Plotly figures would be slow and enormous; twenty-five inline SVGs are a few
-kilobytes of markup and render instantly. These are deliberately crude -- no
-axes, no labels, no interactivity -- because at 64x16px the only readable
-signal is the shape of the line and where the last point sits.
-"""
+"""Inline SVG sparklines and percentile markers for the market monitor."""
 
 from __future__ import annotations
 
@@ -16,17 +9,18 @@ from . import theme
 
 
 def _clean(s: pd.Series, points: int) -> np.ndarray | None:
-    v = pd.Series(s).dropna().astype(float)
+    v = pd.Series(s).replace([np.inf, -np.inf], np.nan).dropna().astype(float)
     if len(v) < 3:
         return None
-    if len(v) > points:                      # even sampling, keeps the last point
+    if len(v) > points:  # even sampling, keeps the last point
         idx = np.linspace(0, len(v) - 1, points).round().astype(int)
         v = v.iloc[idx]
     return v.to_numpy()
 
 
-def spark(s: pd.Series, *, width: int = 72, height: int = 18,
-          color: str | None = None, points: int = 60) -> str:
+def spark(
+    s: pd.Series, *, width: int = 72, height: int = 18, color: str | None = None, points: int = 60
+) -> str:
     """A bare sparkline with a dot on the latest observation."""
     arr = _clean(s, points)
     if arr is None:
@@ -71,17 +65,18 @@ def range_bar(pct: float | None, *, width: int = 62, height: int = 12) -> str:
     else:
         c = theme.BLUE
     ticks = "".join(
-        f'<line x1="{1 + t / 100 * (width - 4):.1f}" y1="{height/2 - 3}" '
-        f'x2="{1 + t / 100 * (width - 4):.1f}" y2="{height/2 + 3}" '
+        f'<line x1="{1 + t / 100 * (width - 4):.1f}" y1="{height / 2 - 3}" '
+        f'x2="{1 + t / 100 * (width - 4):.1f}" y2="{height / 2 + 3}" '
         f'stroke="{theme.AXIS}" stroke-width="1"/>'
-        for t in (25, 50, 75))
+        for t in (25, 50, 75)
+    )
     return (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
         f'style="vertical-align:middle">'
-        f'<line x1="1" y1="{height/2}" x2="{width-3}" y2="{height/2}" '
+        f'<line x1="1" y1="{height / 2}" x2="{width - 3}" y2="{height / 2}" '
         f'stroke="{theme.GRID}" stroke-width="3" stroke-linecap="round"/>'
         f"{ticks}"
-        f'<rect x="{x-1.6:.1f}" y="{height/2 - 5}" width="3.2" height="10" '
+        f'<rect x="{x - 1.6:.1f}" y="{height / 2 - 5}" width="3.2" height="10" '
         f'rx="1.2" fill="{c}"/>'
         f"</svg>"
     )

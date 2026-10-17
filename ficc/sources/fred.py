@@ -1,13 +1,4 @@
-"""FRED via the keyless CSV endpoint.
-
-    https://fred.stlouisfed.org/graph/fredgraph.csv?id=SERIES_ID
-
-No API key, no registration. This is the workhorse: Treasury constant
-maturities, ICE BofA OAS credit indices, breakevens, policy rates, financial
-conditions indices. Publication lag is typically T+1 for daily series.
-
-Do not send a browser User-Agent here -- see ficc/http.py.
-"""
+"""FRED keyless CSV adapter. Missing observations use the marker "."."""
 
 from __future__ import annotations
 
@@ -31,7 +22,8 @@ def _download(series_id: str) -> pd.DataFrame:
     col = df.columns[0]
     df[col] = pd.to_numeric(df[col], errors="coerce")
     df.index.name = "date"
-    return df[[col]].dropna()
+    df = df[[col]].dropna().sort_index(kind="stable")
+    return df[~df.index.duplicated(keep="last")]
 
 
 def get(

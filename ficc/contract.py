@@ -1,15 +1,4 @@
-"""The data contract every fetcher in this project returns.
-
-Two timestamps matter and they are not the same thing:
-
-    as_of      -- the observation date the *source* stamps on the data.
-    fetched_at -- the wall-clock moment *we* pulled it.
-
-Conflating them makes the dashboard lie. FRED's USDJPY series can be six days
-old while treasury.gov has already published today's curve; a tile that says
-"updated 4 seconds ago" over a six-day-old print is worse than no timestamp at
-all. Every panel renders both.
-"""
+"""Time-series data and provenance: source observation dates are separate from pull times."""
 
 from __future__ import annotations
 
@@ -28,10 +17,10 @@ def now() -> _dt.datetime:
 
 
 class Status(str, Enum):
-    OK = "ok"           # fetched fresh, within expected cadence
-    STALE = "stale"     # served, but older than the source's cadence implies
-    CACHED = "cached"   # served from disk cache without a network round trip
-    FAILED = "failed"   # fetch raised; last-known-value served if we had one
+    OK = "ok"  # fetched fresh, within expected cadence
+    STALE = "stale"  # served, but older than the source's cadence implies
+    CACHED = "cached"  # served from disk cache without a network round trip
+    FAILED = "failed"  # fetch raised; last-known-value served if we had one
 
 
 @dataclass(slots=True)
@@ -51,7 +40,7 @@ class Series:
     status: Status = Status.OK
     unit: str = ""
     note: str = ""
-    cadence_days: float = 1.0   # expected publication cadence, in days
+    cadence_days: float = 1.0  # expected publication cadence, in days
     date_basis: str = "observation"  # observation | session | curve
     observation_timezone: str = ""  # only populated when supplied by the source
 
@@ -82,6 +71,10 @@ class Series:
 
     def change(self, periods: int = 1, column: str | None = None) -> float | None:
         """Absolute change over `periods` observations."""
+        if periods < 1:
+            raise ValueError("periods must be positive")
+        if self.frame.empty:
+            return None
         s = (self.frame[column] if column else self.col).dropna()
         if len(s) <= periods:
             return None

@@ -1,12 +1,20 @@
 """Render and exercise the app offline, including lazy tab navigation."""
+
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
-PAGES = ["Dashboard", "Market health", "Rates & curves", "Credit, CLOs & loans",
-         "FX & commodities", "Sources"]
+PAGES = [
+    "Dashboard",
+    "Market health",
+    "Rates & curves",
+    "Credit, CLOs & loans",
+    "FX & commodities",
+    "Sources",
+]
 
 
 def test_every_tab_renders_without_exceptions(fake_net):
@@ -21,16 +29,30 @@ def test_every_tab_renders_without_exceptions(fake_net):
     html = " ".join(htmls)
     for removed in ("Rate dur", "Spread dur", "Duration methods & source dates"):
         assert removed not in html
-    for needle in ("2s5s10s fly", "EUR AAA 10Y", "CP A2/P2", "plumbing",
-                   "Treasury auctions", "Positioning", "Data quality"):
+    for needle in (
+        "2s5s10s fly",
+        "EUR AAA 10Y",
+        "CP A2/P2",
+        "plumbing",
+        "Treasury auctions",
+        "Positioning",
+        "Data quality",
+    ):
         assert needle in html, needle
-    for title in ("Net liquidity", "CP quality spread", "Primary dealer take-down",
-                  "Leveraged funds", "EUR AAA spot", "UST 1m ago"):
+    for title in (
+        "Net liquidity",
+        "CP quality spread",
+        "Primary dealer take-down",
+        "Leveraged funds",
+        "EUR AAA spot",
+        "UST 1m ago",
+    ):
         assert title in " ".join(specs), title
 
 
 def test_initial_page_is_lazy_and_refresh_preserves_pull_time(fake_net, tmp_path):
     from ficc import cache
+
     st.cache_data.clear()
     at = AppTest.from_file(APP, default_timeout=180).run()
     assert not at.exception
@@ -46,9 +68,9 @@ def test_initial_page_is_lazy_and_refresh_preserves_pull_time(fake_net, tmp_path
     assert "Page rendered" in " ".join(m.value for m in at.markdown)
     at.checkbox[0].check().run()
     assert not at.exception
-    assert 'mon mon-full' in " ".join(m.value for m in at.markdown)
+    assert "mon mon-full" in " ".join(m.value for m in at.markdown)
     at.checkbox[0].uncheck().run()
-    assert 'mon mon-compact' in " ".join(m.value for m in at.markdown)
+    assert "mon mon-compact" in " ".join(m.value for m in at.markdown)
     at.selectbox[0].select("Sources").run()
     assert not at.exception
     assert at.session_state["page"] == "Sources"
@@ -57,57 +79,128 @@ def test_initial_page_is_lazy_and_refresh_preserves_pull_time(fake_net, tmp_path
 
 def test_monitor_filter_and_heatmap_scale_controls(fake_net):
     import json
+
     st.cache_data.clear()
     at = AppTest.from_file(APP, default_timeout=180).run()
-    at.text_input[0].input('HY').run()
+    at.text_input[0].input("HY").run()
     assert not at.exception
     tables = [m.value for m in at.markdown if '<table class="mon' in m.value]
-    assert len(tables) == 1 and 'HY OAS' in tables[0] and 'UST 10Y' not in tables[0]
-    at.text_input[0].input('no-such-instrument').run()
-    assert any('No instruments match' in i.value for i in at.info)
-    at.text_input[0].input('').run()
-    at.selectbox[1].select('Credit').run()
+    assert len(tables) == 1 and "HY OAS" in tables[0] and "UST 10Y" not in tables[0]
+    at.text_input[0].input("no-such-instrument").run()
+    assert any("No instruments match" in i.value for i in at.info)
+    at.text_input[0].input("").run()
+    at.selectbox[1].select("Credit").run()
     tables = [m.value for m in at.markdown if '<table class="mon' in m.value]
-    assert 'HY OAS' in tables[0] and 'UST 10Y' not in tables[0]
+    assert "HY OAS" in tables[0] and "UST 10Y" not in tables[0]
+
     def heatmap():
-        return next(json.loads(c.proto.spec) for c in at.get('plotly_chart')
-                    if json.loads(c.proto.spec)['data'][0]['type'] == 'heatmap')
-    assert 'shared bp scale' in heatmap()['layout']['meta']['caption']
+        return next(
+            json.loads(c.proto.spec)
+            for c in at.get("plotly_chart")
+            if json.loads(c.proto.spec)["data"][0]["type"] == "heatmap"
+        )
+
+    assert "shared bp scale" in heatmap()["layout"]["meta"]["caption"]
     at.checkbox[1].check().run()
-    assert 'relative within each row' in heatmap()['layout']['meta']['caption']
-    at.selectbox[0].select('Market health').run()
+    assert "relative within each row" in heatmap()["layout"]["meta"]["caption"]
+    at.selectbox[0].select("Market health").run()
     assert not at.exception
-    assert 'How the regime is calculated' in [e.label for e in at.expander]
-    assert any('Regime history' in m.value for m in at.markdown)
+    assert "How the regime is calculated" in [e.label for e in at.expander]
+    assert any("Regime history" in m.value for m in at.markdown)
 
 
 def test_disjoint_cross_market_histories_render_without_comparisons(fake_net, monkeypatch):
     from ficc.sources import mof
+
     original = mof.curve
+
     def disjoint():
         result = original()
         result.frame.index -= pd.Timedelta(days=50000)
         result.as_of = result.frame.index[-1].date()
         return result
-    import pandas as pd
+
     st.cache_data.clear()
-    monkeypatch.setattr(mof, 'curve', disjoint)
+    monkeypatch.setattr(mof, "curve", disjoint)
     at = AppTest.from_file(APP, default_timeout=180).run()
-    for page in ('Dashboard', 'Rates & curves', 'FX & commodities'):
+    for page in ("Dashboard", "Rates & curves", "FX & commodities"):
         at.selectbox[0].select(page).run()
         assert not at.exception, [e.message for e in at.exception]
-        assert any('no recent overlapping observations' in c.value for c in at.caption)
+        assert any("no recent overlapping observations" in c.value for c in at.caption)
 
 
 def test_refresh_preserves_selected_analysis_page(fake_net):
     st.cache_data.clear()
     at = AppTest.from_file(APP, default_timeout=180).run()
-    at.selectbox[0].select('Market health').run()
-    assert at.session_state['page'] == 'Market health'
+    at.selectbox[0].select("Market health").run()
+    assert at.session_state["page"] == "Market health"
     at.button[0].click().run()
     assert not at.exception
-    assert at.session_state['page'] == 'Market health'
-    assert any('Regime history' in m.value for m in at.markdown)
+    assert at.session_state["page"] == "Market health"
+    assert any("Regime history" in m.value for m in at.markdown)
     at.button[1].click().run()
     assert not at.exception
-    assert at.session_state['page'] == 'Market health'
+    assert at.session_state["page"] == "Market health"
+
+
+def test_every_page_renders_during_a_complete_source_outage(fake_net, monkeypatch):
+    import yfinance
+
+    from ficc import http
+
+    def offline(*args, **kwargs):
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(http, "get", offline)
+    monkeypatch.setattr(yfinance, "download", offline)
+    st.cache_data.clear()
+    app = AppTest.from_file(APP, default_timeout=180).run()
+    for page in PAGES:
+        app.selectbox[0].select(page).run()
+        assert not app.exception, [error.message for error in app.exception]
+
+
+def test_disjoint_credit_funding_and_metal_histories_do_not_crash(fake_net, monkeypatch):
+    from ficc.sources import fred, market
+
+    original_fred, original_basket = fred.get, market.basket
+
+    def shifted_fred(series_id, *args, **kwargs):
+        series = original_fred(series_id, *args, **kwargs)
+        if series_id in ("BAMLH0A1HYBB", "VIXCLS", "IORB", "BAMLH0A0HYM2EY"):
+            series.frame.index -= pd.Timedelta(days=10000)
+            series.as_of = series.frame.index[-1].date()
+        return series
+
+    def shifted_basket(*args, **kwargs):
+        basket = original_basket(*args, **kwargs)
+        if "SI=F" in basket:
+            silver = basket["SI=F"]
+            silver.frame.index -= pd.Timedelta(days=10000)
+            silver.as_of = silver.frame.index[-1].date()
+        return basket
+
+    monkeypatch.setattr(fred, "get", shifted_fred)
+    monkeypatch.setattr(market, "basket", shifted_basket)
+    st.cache_data.clear()
+    app = AppTest.from_file(APP, default_timeout=180).run()
+    for page in PAGES:
+        app.selectbox[0].select(page).run()
+        assert not app.exception, [error.message for error in app.exception]
+
+
+def test_partial_treasury_curve_renders_remaining_tenors(fake_net, monkeypatch):
+    from ficc.sources import treasury
+
+    original = treasury._download
+
+    def partial(*args, **kwargs):
+        frame = original(*args, **kwargs)
+        return frame.drop(columns=["10 Yr", "5 Yr", "3 Mo"], errors="ignore")
+
+    monkeypatch.setattr(treasury, "_download", partial)
+    st.cache_data.clear()
+    app = AppTest.from_file(APP, default_timeout=180).run()
+    for page in ("Dashboard", "Rates & curves", "Sources"):
+        app.selectbox[0].select(page).run()
+        assert not app.exception, [error.message for error in app.exception]

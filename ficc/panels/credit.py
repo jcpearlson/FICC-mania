@@ -1,12 +1,4 @@
-"""Credit: IG, HY, the ratings ladder, leveraged loans and CLOs.
-
-Where the free-data honesty matters most. There is no free source for CLO
-tranche spread curves, primary AAA discount margins, or loan index levels --
-those are licensed products. What *is* free is the listed CLO ETF complex
-(JAAA, JBBB, CLOA, CLOZ) and the loan ETF BKLN, whose prices and drawdowns
-track the underlying complex closely enough to be a daily read. Everything
-sourced that way is labelled a proxy on the page, never presented as the index.
-"""
+"""Credit spreads, ratings, lending standards and CLO/loan ETF proxies."""
 
 from __future__ import annotations
 
@@ -20,8 +12,12 @@ from ..sources import fred, market
 
 # ICE BofA OAS ladder -- the spine of the panel.
 LADDER = {
-    "BAMLC0A1CAAA": "AAA", "BAMLC0A2CAA": "AA", "BAMLC0A3CA": "A",
-    "BAMLC0A4CBBB": "BBB", "BAMLH0A1HYBB": "BB", "BAMLH0A2HYB": "B",
+    "BAMLC0A1CAAA": "AAA",
+    "BAMLC0A2CAA": "AA",
+    "BAMLC0A3CA": "A",
+    "BAMLC0A4CBBB": "BBB",
+    "BAMLH0A1HYBB": "BB",
+    "BAMLH0A2HYB": "B",
     "BAMLH0A3HYC": "CCC & lower",
 }
 HEADLINE = {
@@ -31,27 +27,33 @@ HEADLINE = {
     "BAMLHE00EHYIOAS": "Euro HY OAS",
 }
 YIELDS = {"BAMLC0A0CMEY": "IG yield", "BAMLH0A0HYM2EY": "HY yield"}
-BANKS = {"DRTSCILM": "SLOOS: net % tightening C&I (large firms)",
-         "TOTCI": "C&I loans outstanding ($bn)"}
+BANKS = {
+    "DRTSCILM": "SLOOS: net % tightening C&I (large firms)",
+    "TOTCI": "C&I loans outstanding ($bn)",
+}
 
-# CLOA/CLOZ dropped: redundant with JAAA/JBBB and much younger, which made a
-# shared index base impossible without throwing away most of the history.
-# JNK dropped for the same reason in reverse -- ~0.99 correlated with HYG.
-CLO_ETFS = {"JAAA": "AAA CLO (JAAA)", "JBBB": "BBB CLO (JBBB)",
-            "BKLN": "Lev loans (BKLN)"}
-CREDIT_ETFS = {"LQD": "IG (LQD)", "HYG": "HY (HYG)", "BKLN": "Lev loans (BKLN)",
-               "EMB": "EM $ debt (EMB)", "JAAA": "AAA CLO (JAAA)"}
-DEFAULTS = {"DRBLACBS": "Business loan delinquency rate",
-            "CORBLACBS": "Business loan charge-off rate"}
+CLO_ETFS = {"JAAA": "AAA CLO (JAAA)", "JBBB": "BBB CLO (JBBB)", "BKLN": "Lev loans (BKLN)"}
+CREDIT_ETFS = {
+    "LQD": "IG (LQD)",
+    "HYG": "HY (HYG)",
+    "BKLN": "Lev loans (BKLN)",
+    "EMB": "EM $ debt (EMB)",
+    "JAAA": "AAA CLO (JAAA)",
+}
+DEFAULTS = {
+    "DRBLACBS": "Business loan delinquency rate",
+    "CORBLACBS": "Business loan charge-off rate",
+}
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _load():
+def load():
     head = fred.many(HEADLINE)
     ladder = fred.many(LADDER)
     yields = fred.many(YIELDS)
-    banks = {k: fred.get(k, v, cadence_days=(90 if k == "DRTSCILM" else 7))
-             for k, v in BANKS.items()}
+    banks = {
+        k: fred.get(k, v, cadence_days=(90 if k == "DRTSCILM" else 7)) for k, v in BANKS.items()
+    }
     # total_return=True: these are income instruments. On raw close a JAAA line
     # drifts down several percent a year on distributions alone, and drawdown
     # treats every ex-dividend date as stress. One shared period so the
@@ -64,9 +66,22 @@ def _load():
 
 
 def render() -> None:
-    head, ladder, yields, banks, clo, etfs, vix, defaults = _load()
-    ui.quality_summary([(s, None) for s in (*head.values(), *ladder.values(), *yields.values(),
-                        *banks.values(), *clo.values(), *etfs.values(), *defaults.values(), vix)])
+    head, ladder, yields, banks, clo, etfs, vix, defaults = load()
+    ui.quality_summary(
+        [
+            (s, None)
+            for s in (
+                *head.values(),
+                *ladder.values(),
+                *yields.values(),
+                *banks.values(),
+                *clo.values(),
+                *etfs.values(),
+                *defaults.values(),
+                vix,
+            )
+        ]
+    )
 
     # ---- headline tiles, colored by where the spread sits in its own history
     tiles = []
@@ -75,19 +90,40 @@ def render() -> None:
         if not s.ok:
             continue
         z = an.zscore(s.col, 5)
-        tiles.append(ui.tile(
-            label, s.latest() * 100 if s.latest() else None, s, unit="bp", dp=0,
-            delta=an.pct_change_bp(s.col, 1), mode="risk",
-            sub=f"{z.window_label} pct {z.pct:.0f} · {z.verdict}" if z else ""))
+        tiles.append(
+            ui.tile(
+                label,
+                s.latest() * 100 if s.latest() is not None else None,
+                s,
+                unit="bp",
+                dp=0,
+                delta=an.pct_change_bp(s.col, 1),
+                mode="risk",
+                sub=f"{z.window_label} pct {z.pct:.0f} · {z.verdict}" if z else "",
+            )
+        )
     # The dispersion tile: CCC minus BB is where HY stress shows up first.
     bb, ccc = ladder.get("BAMLH0A1HYBB"), ladder.get("BAMLH0A3HYC")
-    if bb and ccc and bb.ok and ccc.ok:
-        q = ((ccc.col - bb.col).dropna()) * 100
+    dispersion = (
+        (ccc.col - bb.col).dropna() * 100
+        if bb and ccc and bb.ok and ccc.ok
+        else pd.Series(dtype=float)
+    )
+    if not dispersion.empty:
+        q = dispersion
         z = an.zscore(q, 5)
-        tiles.append(ui.tile(
-            "CCC − BB quality spread", float(q.iloc[-1]), ccc, unit="bp", dp=0,
-            delta=float(q.iloc[-1] - q.iloc[-2]) if len(q) > 1 else None, mode="risk",
-            sub=f"{z.window_label} pct {z.pct:.0f} · {z.verdict_width}" if z else ""))
+        tiles.append(
+            ui.tile(
+                "CCC − BB quality spread",
+                float(q.iloc[-1]),
+                ccc,
+                unit="bp",
+                dp=0,
+                delta=float(q.iloc[-1] - q.iloc[-2]) if len(q) > 1 else None,
+                mode="risk",
+                sub=f"{z.window_label} pct {z.pct:.0f} · {z.verdict_width}" if z else "",
+            )
+        )
     ui.tile_row(tiles[:5])
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
@@ -95,18 +131,25 @@ def render() -> None:
 
     with c1:
         fig = go.Figure()
-        for (sid, label), color in zip(HEADLINE.items(),
-                                       (theme.BLUE, theme.ORANGE, theme.AQUA, theme.MAGENTA)):
+        for (sid, label), color in zip(
+            HEADLINE.items(), (theme.BLUE, theme.ORANGE, theme.AQUA, theme.MAGENTA)
+        ):
             s = head[sid]
             if s.ok:
-                d = (s.col * 100)
-                fig.add_trace(go.Scatter(x=d.index, y=d, name=label,
-                                         line=dict(width=2, color=color),
-                                         hovertemplate="%{y:.0f} bp<extra>"
-                                                       f"{label}</extra>"))
+                d = s.col * 100
+                fig.add_trace(
+                    go.Scatter(
+                        x=d.index,
+                        y=d,
+                        name=label,
+                        line=dict(width=2, color=color),
+                        hovertemplate=f"%{{y:.0f}} bp<extra>{label}</extra>",
+                    )
+                )
         fig.update_layout(
             title="Credit spreads — option-adjusted, full available history",
-            yaxis=dict(title="OAS (bp)"))
+            yaxis=dict(title="OAS (bp)"),
+        )
         ui.chart(fig, height=320)
 
     with c2:
@@ -118,62 +161,91 @@ def render() -> None:
             if not s.ok:
                 continue
             d = s.col.dropna()
-            rows.append({"rating": label, "now": float(d.iloc[-1]) * 100,
-                         "m3": float(d.iloc[-64]) * 100 if len(d) > 64 else None,
-                         "y1": float(d.iloc[-252]) * 100 if len(d) > 252 else None})
+            rows.append(
+                {
+                    "rating": label,
+                    "now": float(d.iloc[-1]) * 100,
+                    "m3": float(d.iloc[-64]) * 100 if len(d) > 64 else None,
+                    "y1": float(d.iloc[-252]) * 100 if len(d) > 252 else None,
+                }
+            )
         if rows:
             df = pd.DataFrame(rows)
             fig = go.Figure()
-            for col, name, color, w in (("y1", "1y ago", theme.MUTED, 1.5),
-                                        ("m3", "3m ago", theme.INK_2, 1.5),
-                                        ("now", "Today", theme.BLUE, 2.6)):
+            for col, name, color, w in (
+                ("y1", "1y ago", theme.MUTED, 1.5),
+                ("m3", "3m ago", theme.INK_2, 1.5),
+                ("now", "Today", theme.BLUE, 2.6),
+            ):
                 if col in df and df[col].notna().any():
-                    fig.add_trace(go.Scatter(
-                        x=df["rating"], y=df[col], name=name, mode="lines+markers",
-                        line=dict(width=w, color=color,
-                                  dash="dot" if col != "now" else "solid"),
-                        marker=dict(size=8 if col == "now" else 6),
-                        hovertemplate="%{y:.0f} bp<extra>" + name + "</extra>"))
-            fig.update_layout(title="Ratings ladder — OAS by rating",
-                              yaxis=dict(title="OAS (bp)", type="log"))
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["rating"],
+                            y=df[col],
+                            name=name,
+                            mode="lines+markers",
+                            line=dict(
+                                width=w, color=color, dash="dot" if col != "now" else "solid"
+                            ),
+                            marker=dict(size=8 if col == "now" else 6),
+                            hovertemplate="%{y:.0f} bp<extra>" + name + "</extra>",
+                        )
+                    )
+            fig.update_layout(
+                title="Ratings ladder — OAS by rating", yaxis=dict(title="OAS (bp)", type="log")
+            )
             ui.chart(fig, height=320)
 
     # ---- CLOs and loans -------------------------------------------------
-    ui.section("Structured credit & loans",
-               "CLO tranche spreads are not public — the listed CLO ETF complex is used as a daily proxy")
+    ui.section(
+        "Structured credit & loans",
+        "CLO tranche spreads are not public — the listed CLO ETF complex is used as a daily proxy",
+    )
     c1, c2, c3 = ui.columns(3)
 
     with c1:
-        avail = {lbl: clo[sym].col for sym, lbl in CLO_ETFS.items()
-                 if clo.get(sym) and clo[sym].ok}
+        avail = {lbl: clo[sym].col for sym, lbl in CLO_ETFS.items() if clo.get(sym) and clo[sym].ok}
         if avail:
             idx = an.common_base_index(avail)
             fig = go.Figure()
-            for (label, color) in zip(idx.columns, (theme.BLUE, theme.ORANGE, theme.YELLOW)):
-                fig.add_trace(go.Scatter(x=idx.index, y=idx[label], name=label,
-                                         line=dict(width=2, color=color),
-                                         hovertemplate="%{y:.1f}<extra>"
-                                                       f"{label}</extra>"))
+            for label, color in zip(idx.columns, (theme.BLUE, theme.ORANGE, theme.YELLOW)):
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx.index,
+                        y=idx[label],
+                        name=label,
+                        line=dict(width=2, color=color),
+                        hovertemplate=f"%{{y:.1f}}<extra>{label}</extra>",
+                    )
+                )
             fig.update_layout(
                 title="CLO & loan total return, shared base = 100 (proxy)",
-                yaxis=dict(title="Index"))
+                yaxis=dict(title="Index"),
+            )
             ui.chart(fig, height=290)
 
     with c2:
-        # Drawdown is the honest stress read on a price-only proxy.
+        # Adjusted prices include distributions in the drawdown calculation.
         fig = go.Figure()
         for (sym, label), color in zip(
-                (("JAAA", "AAA CLO"), ("JBBB", "BBB CLO"), ("BKLN", "Lev loans")),
-                (theme.BLUE, theme.ORANGE, theme.YELLOW)):
+            (("JAAA", "AAA CLO"), ("JBBB", "BBB CLO"), ("BKLN", "Lev loans")),
+            (theme.BLUE, theme.ORANGE, theme.YELLOW),
+        ):
             s_ = clo.get(sym)
             if s_ and s_.ok:
                 dd = an.drawdown(s_.col)
-                fig.add_trace(go.Scatter(x=dd.index, y=dd, name=label,
-                                         line=dict(width=2, color=color),
-                                         hovertemplate="%{y:.2f}%<extra>"
-                                                       f"{label}</extra>"))
-        fig.update_layout(title="Total-return drawdown from high (proxy)",
-                          yaxis=dict(title="%", ticksuffix="%"))
+                fig.add_trace(
+                    go.Scatter(
+                        x=dd.index,
+                        y=dd,
+                        name=label,
+                        line=dict(width=2, color=color),
+                        hovertemplate=f"%{{y:.2f}}%<extra>{label}</extra>",
+                    )
+                )
+        fig.update_layout(
+            title="Total-return drawdown from high (proxy)", yaxis=dict(title="%", ticksuffix="%")
+        )
         ui.chart(fig, height=290)
 
     with c3:
@@ -181,64 +253,93 @@ def render() -> None:
         if s and s.ok:
             d = s.col.tail(80)
             colors = [theme.CRITICAL if v > 0 else theme.GOOD for v in d]
-            fig = go.Figure(go.Bar(x=d.index, y=d, marker=dict(color=colors),
-                                   hovertemplate="%{y:.1f}%<extra></extra>"))
+            fig = go.Figure(
+                go.Bar(
+                    x=d.index,
+                    y=d,
+                    marker=dict(color=colors),
+                    hovertemplate="%{y:.1f}%<extra></extra>",
+                )
+            )
             fig.add_hline(y=0, line=dict(color=theme.AXIS, width=1))
             fig.update_layout(
                 title="Bank lending standards — SLOOS net % tightening C&I",
-                yaxis=dict(title="net %", ticksuffix="%"))
+                yaxis=dict(title="net %", ticksuffix="%"),
+            )
             ui.chart(fig, height=290, legend=False, unified=False)
             st.markdown(
                 f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
                 "Quarterly survey — above zero means banks report tightening. This is "
                 "a lending-standards measure, not a calibrated default forecast.</div>",
-                unsafe_allow_html=True)
+                unsafe_allow_html=True,
+            )
 
     # ---- credit vs vol divergence ---------------------------------------
     c1, c2 = ui.columns(2)
     with c1:
         hy = head.get("BAMLH0A0HYM2")
         if hy and hy.ok and vix.ok:
-            df = pd.concat([(hy.col * 100).rename("hy"), vix.col.rename("vix")],
-                           axis=1).dropna()
-            # One standardisation, used for both the lines and the quoted gap.
-            # Scoring the headline separately from the plot (different ddof,
-            # different window) quotes a sigma that matches neither line.
-            fig = go.Figure()
-            zz = {}
-            for col, name, color in (("hy", "HY OAS (z)", theme.ORANGE),
-                                     ("vix", "VIX (z)", theme.BLUE)):
-                z_ = (df[col] - df[col].mean()) / df[col].std(ddof=0)
-                zz[col] = float(z_.iloc[-1])
-                fig.add_trace(go.Scatter(x=z_.index, y=z_, name=name,
-                                         line=dict(width=2, color=color),
-                                         hovertemplate="%{y:+.2f}σ<extra>"
-                                                       f"{name}</extra>"))
-            gap = zz["hy"] - zz["vix"]
-            span = (df.index[-1] - df.index[0]).days / 365.25
-            fig.update_layout(
-                title=f"Credit vs equity vol — both in z-space · gap {gap:+.2f}σ",
-                yaxis=dict(title=f"z-score ({span:.0f}y)", ticksuffix="σ"))
-            ui.chart(fig, height=280)
-            st.markdown(
-                f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
-                "Both series are standardised over the displayed sample. Positive gap "
-                "means HY spreads are higher relative to their history than VIX is. "
-                "This is descriptive positioning, not a tested trading signal.</div>", unsafe_allow_html=True)
+            df = pd.concat(
+                [(hy.col * 100).rename("hy"), vix.col.rename("vix")], axis=1, sort=True
+            ).dropna()
+            if df.empty:
+                st.caption("HY OAS and VIX have no overlapping observations.")
+            else:
+                # One standardisation, used for both the lines and the quoted gap.
+                # Scoring the headline separately from the plot (different ddof,
+                # different window) quotes a sigma that matches neither line.
+                fig = go.Figure()
+                zz = {}
+                for col, name, color in (
+                    ("hy", "HY OAS (z)", theme.ORANGE),
+                    ("vix", "VIX (z)", theme.BLUE),
+                ):
+                    z_ = (df[col] - df[col].mean()) / df[col].std(ddof=0)
+                    zz[col] = float(z_.iloc[-1])
+                    fig.add_trace(
+                        go.Scatter(
+                            x=z_.index,
+                            y=z_,
+                            name=name,
+                            line=dict(width=2, color=color),
+                            hovertemplate=f"%{{y:+.2f}}σ<extra>{name}</extra>",
+                        )
+                    )
+                gap = zz["hy"] - zz["vix"]
+                span = (df.index[-1] - df.index[0]).days / 365.25
+                fig.update_layout(
+                    title=f"Credit vs equity vol — both in z-space · gap {gap:+.2f}σ",
+                    yaxis=dict(title=f"z-score ({span:.0f}y)", ticksuffix="σ"),
+                )
+                ui.chart(fig, height=280)
+                st.markdown(
+                    f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
+                    "Both series are standardised over the displayed sample. Positive gap "
+                    "means HY spreads are higher relative to their history than VIX is. "
+                    "This is descriptive positioning, not a tested trading signal.</div>",
+                    unsafe_allow_html=True,
+                )
 
     with c2:
         fig = go.Figure()
-        avail = {lbl: etfs[sym].col for sym, lbl in CREDIT_ETFS.items()
-                 if etfs.get(sym) and etfs[sym].ok}
+        avail = {
+            lbl: etfs[sym].col for sym, lbl in CREDIT_ETFS.items() if etfs.get(sym) and etfs[sym].ok
+        }
         if avail:
             idx = an.common_base_index(avail)
             for label, color in zip(idx.columns, theme.SERIES):
-                fig.add_trace(go.Scatter(x=idx.index, y=idx[label], name=label,
-                                         line=dict(width=2, color=color),
-                                         hovertemplate="%{y:.1f}<extra>"
-                                                       f"{label}</extra>"))
-        fig.update_layout(title="Credit ETF total return — shared base = 100",
-                          yaxis=dict(title="Index"))
+                fig.add_trace(
+                    go.Scatter(
+                        x=idx.index,
+                        y=idx[label],
+                        name=label,
+                        line=dict(width=2, color=color),
+                        hovertemplate=f"%{{y:.1f}}<extra>{label}</extra>",
+                    )
+                )
+        fig.update_layout(
+            title="Credit ETF total return — shared base = 100", yaxis=dict(title="Index")
+        )
         ui.chart(fig, height=280)
 
     _risk_premium(head, yields, defaults)
@@ -253,8 +354,10 @@ def _risk_premium(head, yields, defaults) -> None:
     equivalent, alongside a separate bank-loss proxy. OAS / effective yield
     measures the spread share of yield, without decomposing return or sensitivity.
     """
-    ui.section("Is the spread paying for the risk?",
-               "spread-implied loss compensation, a separate bank-loss proxy, and spread share of yield")
+    ui.section(
+        "Is the spread paying for the risk?",
+        "spread-implied loss compensation, a separate bank-loss proxy, and spread share of yield",
+    )
     c1, c2 = ui.columns(2)
 
     with c1:
@@ -265,20 +368,34 @@ def _risk_premium(head, yields, defaults) -> None:
         if hy and hy.ok:
             pd_hy = hy.col.apply(an.implied_default_rate)
             start = pd_hy.index[0]
-            fig.add_trace(go.Scatter(x=pd_hy.index, y=pd_hy, name="HY default equivalent (all OAS allocated to loss)",
-                                     line=dict(width=2, color=theme.ORANGE),
-                                     hovertemplate="%{y:.2f}%<extra>implied</extra>"))
+            fig.add_trace(
+                go.Scatter(
+                    x=pd_hy.index,
+                    y=pd_hy,
+                    name="HY default equivalent (all OAS allocated to loss)",
+                    line=dict(width=2, color=theme.ORANGE),
+                    hovertemplate="%{y:.2f}%<extra>implied</extra>",
+                )
+            )
         if chg and chg.ok:
             # A charge-off rate is a *loss* rate (net of recovery). Grossed up
             # at the same 40% recovery it becomes a default-rate equivalent,
             # which is the only way the two lines can share an axis honestly.
             d = an.loss_to_default_rate(chg.col)
             d = d[d.index >= start] if start is not None else d
-            fig.add_trace(go.Scatter(x=d.index, y=d, name="Bank C&I default equivalent (different borrower pool)",
-                                     line=dict(width=2, color=theme.AQUA, shape="hv"),
-                                     hovertemplate="%{y:.2f}%<extra>realised</extra>"))
-        fig.update_layout(title="HY vs bank C&I default equivalents · 40% recovery assumption",
-                          yaxis=dict(title="% per year", ticksuffix="%"))
+            fig.add_trace(
+                go.Scatter(
+                    x=d.index,
+                    y=d,
+                    name="Bank C&I default equivalent (different borrower pool)",
+                    line=dict(width=2, color=theme.AQUA, shape="hv"),
+                    hovertemplate="%{y:.2f}%<extra>realised</extra>",
+                )
+            )
+        fig.update_layout(
+            title="HY vs bank C&I default equivalents · 40% recovery assumption",
+            yaxis=dict(title="% per year", ticksuffix="%"),
+        )
         ui.chart(fig, height=280)
         if hy and hy.ok:
             oas = hy.latest()
@@ -289,32 +406,49 @@ def _risk_premium(head, yields, defaults) -> None:
                 f"Allocating all {oas * 100:.0f}bp of OAS to losses, at 40% recovery, gives a "
                 f"<b style='color:{theme.INK}'>{imp:.2f}%</b> annual default equivalent. "
                 "OAS also compensates for liquidity and risk, so this is not a default forecast. "
-                + (f"Bank C&amp;I charge-offs are {loss:.2f}% (realised losses), "
-                   "from a different borrower pool and observation date. They do not measure "
-                   "HY losses; subtracting them from HY OAS would not isolate a credit premium."
-                   if loss == loss else "")
-                + "</div>", unsafe_allow_html=True)
+                + (
+                    f"Bank C&amp;I charge-offs are {loss:.2f}% (realised losses), "
+                    "from a different borrower pool and observation date. They do not measure "
+                    "HY losses; subtracting them from HY OAS would not isolate a credit premium."
+                    if loss == loss
+                    else ""
+                )
+                + "</div>",
+                unsafe_allow_html=True,
+            )
 
     with c2:
         rows = []
-        for oas_id, ey_id, name in (("BAMLC0A0CM", "BAMLC0A0CMEY", "IG"),
-                                    ("BAMLH0A0HYM2", "BAMLH0A0HYM2EY", "HY")):
+        for oas_id, ey_id, name in (
+            ("BAMLC0A0CM", "BAMLC0A0CMEY", "IG"),
+            ("BAMLH0A0HYM2", "BAMLH0A0HYM2EY", "HY"),
+        ):
             o, y = head.get(oas_id), yields.get(ey_id)
             if o and y and o.ok and y.ok:
-                share = (o.col / y.col * 100).dropna()
-                rows.append((name, share))
+                share = an.ratio(o.col, y.col) * 100
+                if not share.empty:
+                    rows.append((name, share))
         if rows:
             fig = go.Figure()
             for (name, share), color in zip(rows, (theme.BLUE, theme.ORANGE)):
-                fig.add_trace(go.Scatter(x=share.index, y=share, name=name,
-                                         line=dict(width=2, color=color),
-                                         hovertemplate="%{y:.1f}%<extra>"
-                                                       f"{name}</extra>"))
-            fig.update_layout(title="Spread share of yield — OAS / effective yield",
-                              yaxis=dict(title="OAS / effective yield", ticksuffix="%"))
+                fig.add_trace(
+                    go.Scatter(
+                        x=share.index,
+                        y=share,
+                        name=name,
+                        line=dict(width=2, color=color),
+                        hovertemplate=f"%{{y:.1f}}%<extra>{name}</extra>",
+                    )
+                )
+            fig.update_layout(
+                title="Spread share of yield — OAS / effective yield",
+                yaxis=dict(title="OAS / effective yield", ticksuffix="%"),
+            )
             ui.chart(fig, height=280)
             bits = " · ".join(f"{n} {s.iloc[-1]:.0f}%" for n, s in rows)
             st.markdown(
                 f"<div style='font-size:10.5px;color:{theme.MUTED};margin-top:-6px'>"
                 f"{bits}. This is a spread-to-yield ratio, not a decomposition of expected "
-                "returns or a measure of rate sensitivity.</div>", unsafe_allow_html=True)
+                "returns or a measure of rate sensitivity.</div>",
+                unsafe_allow_html=True,
+            )

@@ -1,16 +1,6 @@
-"""Japanese Government Bond yield curve from the Ministry of Finance.
+"""JGB yield curves from the Ministry of Finance English CSV publications.
 
-MOF publishes two files. The Japanese-language `jgbcm.csv` is Shift-JIS encoded
-with Reiwa-era dates ("R8.8.3" = 2026-08-03), which is a decoding tax for no
-benefit. The English mirror is plain ASCII with ISO-ish dates, so we use that:
-
-    .../interest_rate/jgbcme.csv                  current fiscal year
-    .../interest_rate/historical/jgbcme_all.csv   full history back to 1974
-
-We stitch both: the `_all` file lags by a few weeks, the current-year file
-carries the last few sessions. History matters here because the JGB z-scores
-and the "where is 10y vs the old YCC band" read are the whole point.
-"""
+The current file takes precedence over overlapping historical observations."""
 
 from __future__ import annotations
 
@@ -25,9 +15,23 @@ BASE = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate"
 CURRENT = f"{BASE}/jgbcme.csv"
 HISTORY = f"{BASE}/historical/jgbcme_all.csv"
 
-TENORS = {"1Y": 1, "2Y": 2, "3Y": 3, "4Y": 4, "5Y": 5, "6Y": 6, "7Y": 7,
-          "8Y": 8, "9Y": 9, "10Y": 10, "15Y": 15, "20Y": 20, "25Y": 25,
-          "30Y": 30, "40Y": 40}
+TENORS = {
+    "1Y": 1,
+    "2Y": 2,
+    "3Y": 3,
+    "4Y": 4,
+    "5Y": 5,
+    "6Y": 6,
+    "7Y": 7,
+    "8Y": 8,
+    "9Y": 9,
+    "10Y": 10,
+    "15Y": 15,
+    "20Y": 20,
+    "25Y": 25,
+    "30Y": 30,
+    "40Y": 40,
+}
 
 
 def _parse(text: str) -> pd.DataFrame:
@@ -46,9 +50,11 @@ def _download(url: str) -> pd.DataFrame:
 
 def curve(with_history: bool = True) -> Series:
     frames, metas = [], []
-    targets = [("jgbcme_current", CURRENT, cache.TTL_DAILY)]
+    targets = []
     if with_history:
         targets.append(("jgbcme_all", HISTORY, cache.TTL_HEAVY))
+    # Append current data last so it wins on overlapping observation dates.
+    targets.append(("jgbcme_current", CURRENT, cache.TTL_DAILY))
     for key, url, ttl in targets:
         try:
             f, m = cache.through("mof", key, ttl, lambda u=url: _download(u))
@@ -58,12 +64,16 @@ def curve(with_history: bool = True) -> Series:
             continue
     if not frames:
         return failed("jgb", "JGB curve", "MOF Japan", "no MOF file reachable")
-    frame = pd.concat(frames).sort_index()
+    frame = pd.concat(frames).sort_index(kind="stable")
     frame = frame[~frame.index.duplicated(keep="last")]
-    latest_frame = max(frames, key=lambda f: f.index.max())
+    latest_frame = max(reversed(frames), key=lambda f: f.index.max())
     frame.attrs[cache.FETCHED_AT] = latest_frame.attrs[cache.FETCHED_AT]
     return Series(
-        key="jgb", label="JGB par curve", frame=frame,
-        source="MOF Japan", unit="%", cadence_days=1,
+        key="jgb",
+        label="JGB par curve",
+        frame=frame,
+        source="MOF Japan",
+        unit="%",
+        cadence_days=1,
         status=worst_status(metas),
     )

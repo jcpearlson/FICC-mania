@@ -1,34 +1,28 @@
-"""On-disk TTL cache keyed by (source, key, params).
-
-Two jobs. First, stop a widget interaction from re-fetching sixty series and
-getting us rate-limited. Second -- and the reason it stores payloads rather
-than just memoising -- let a panel serve last-known-value with an honest
-"stale since" badge when a source is down, instead of rendering blank.
-
-TTLs are matched to publication cadence, not chosen arbitrarily: a FRED daily
-series does not change within the hour, so re-pulling it is pure waste.
-"""
+"""Disk TTL cache with atomic writes, preserved pull times and stale fallback."""
 
 from __future__ import annotations
 
-import hashlib
 import datetime as dt
+import hashlib
 import json
+import logging
 import pickle
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
-CACHE_DIR.mkdir(exist_ok=True)
+logger = logging.getLogger(__name__)
 
 # Sensible TTLs in seconds, by cadence class.
-TTL_INTRADAY = 120        # live quotes
-TTL_DAILY = 30 * 60       # daily-published series
+TTL_INTRADAY = 120  # live quotes
+TTL_DAILY = 30 * 60  # daily-published series
 TTL_WEEKLY = 6 * 60 * 60  # weekly releases
-TTL_HEAVY = 24 * 60 * 60  # large static-ish downloads (ACM xls, CFTC zip)
+TTL_HEAVY = 24 * 60 * 60  # bulk historical downloads
 FETCHED_AT = "ficc_fetched_at"
 
 
@@ -52,27 +46,42 @@ def load(source: str, key: str, ttl: int, params: Any = None) -> tuple[Any, bool
     fallback -- the caller decides whether to try the network first.
     """
     p = _path(source, key, params)
-    if not p.exists():
-        return None
     try:
         written = p.stat().st_mtime
-        age = time.time() - written
+        age = max(0.0, time.time() - written)
         with p.open("rb") as fh:
             # Legacy payloads have no timestamp; their write time is the best
             # available pull time. Never replace it with the current time.
-            payload = _stamp(pickle.load(fh), dt.datetime.fromtimestamp(written, dt.timezone.utc))
+            payload = _stamp(
+                _check(pickle.load(fh)), dt.datetime.fromtimestamp(written, dt.timezone.utc)
+            )
             return payload, age < ttl, age
     except Exception:
+        logger.debug("Cache miss or unreadable entry: %s", p, exc_info=True)
         return None
 
 
 def store(source: str, key: str, payload: Any, params: Any = None) -> None:
+    temporary = None
     try:
-        with _path(source, key, params).open("wb") as fh:
-            pickle.dump(_stamp(payload, dt.datetime.now(dt.timezone.utc)), fh,
-                        protocol=pickle.HIGHEST_PROTOCOL)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # Readers must see either the previous complete payload or the new one.
+        with tempfile.NamedTemporaryFile(dir=CACHE_DIR, suffix=".tmp", delete=False) as fh:
+            temporary = Path(fh.name)
+            pickle.dump(
+                _stamp(payload, dt.datetime.now(dt.timezone.utc)),
+                fh,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        temporary.replace(_path(source, key, params))
     except Exception:
-        pass  # a cache write failure is never fatal
+        logger.warning("Could not write cache entry for %s/%s", source, key, exc_info=True)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Could not remove temporary cache entry", exc_info=True)
 
 
 class EmptyPayload(ValueError):
@@ -91,6 +100,9 @@ def _check(payload: Any) -> Any:
     if isinstance(payload, (pd.DataFrame, pd.Series)):
         if payload.empty or payload.isna().all(axis=None):
             raise EmptyPayload("source returned no usable rows")
+        numeric = payload.select_dtypes("number") if isinstance(payload, pd.DataFrame) else payload
+        if numeric.empty or not np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan)).any():
+            raise EmptyPayload("source returned no finite numeric observations")
     return payload
 
 
@@ -119,6 +131,8 @@ def clear() -> int:
         try:
             f.unlink()
             n += 1
-        except Exception:
-            pass
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.warning("Could not remove cache entry: %s", f, exc_info=True)
     return n

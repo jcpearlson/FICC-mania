@@ -185,11 +185,14 @@ tests/
 ```bash
 uv run --group dev pytest      # offline source and app regression tests
 uv run --group dev ruff check .
+uv run --group dev ruff format --check .
 ```
 
 `tests/fakenet.py` replaces `http.get` and `yfinance.download` with
-deterministic synthetic payloads shaped like each real source, so the parsers,
-analytics and every tab's render path run in CI without touching an endpoint.
+deterministic synthetic payloads shaped like each real source. Tests cover the
+parsers, analytics, cache failure handling, HTTP retries and provider isolation,
+and every tab's render path without touching a live endpoint. CI runs lint,
+formatting checks and tests on Python 3.11 and 3.13.
 
 ### Colour conventions
 
@@ -204,10 +207,8 @@ Three, used deliberately and never mixed within one component:
 - **Status colours** (good / warning / serious / critical) are reserved for
   freshness badges and range alerts, never reused as a series colour.
 
-The categorical palette is a validated eight-hue ramp; it clears the lightness
-band, chroma floor, adjacent-pair colour-vision separation, normal-vision floor
-and 3:1 contrast against this app's dark surface. Do not add a ninth hue — a
-ninth series folds into "Other" or becomes a small multiple.
+The shared categorical palette has eight colours. For more series, use small
+multiples or group the remainder into "Other".
 
 ### Per-source HTTP headers are not optional
 

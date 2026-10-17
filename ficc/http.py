@@ -1,29 +1,13 @@
-"""Per-source HTTP configuration.
+"""Provider-specific HTTP sessions, headers, request spacing and transient retries.
 
-Sources disagree about what a well-behaved client looks like, and getting this
-wrong looks exactly like an outage. Two verified facts drive this module:
-
-  * FRED  returns a connection error if you send a browser User-Agent.
-  * treasury.gov  times out if you *don't*.
-
-So headers are per-source, never global. Each source also gets its own
-`requests.Session` (connection reuse) and a minimum interval between calls --
-concurrent hammering of FRED reproducibly yields empty responses.
-
-Overriding headers
-------------------
-If a source starts refusing us, copy the request headers out of Chrome's
-Network tab and drop them into `headers.local.json` at the repo root:
-
-    { "cme": { "User-Agent": "...", "Cookie": "...", "Accept": "..." } }
-
-Those are merged over the defaults below at import time. The file is
-gitignored, since pasted headers usually carry session cookies.
-"""
+Optional headers.local.json profiles override defaults. Keep this file private;
+browser headers can contain session cookies. FRED uses a non-browser profile,
+while Treasury requests use a browser User-Agent."""
 
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -51,18 +35,36 @@ _PROFILES: dict[str, tuple[dict[str, str], float]] = {
     "default": ({"User-Agent": CHROME_UA}, 0.25),
 }
 
-_OVERRIDES_PATH = Path(__file__).resolve().parent.parent / "headers.local.json"
-if _OVERRIDES_PATH.exists():
+logger = logging.getLogger(__name__)
+
+
+def _load_overrides(path: Path) -> None:
     try:
-        for _src, _hdrs in json.loads(_OVERRIDES_PATH.read_text()).items():
-            _base, _gap = _PROFILES.get(_src, _PROFILES["default"])
-            _PROFILES[_src] = ({**_base, **_hdrs}, _gap)
-    except Exception:  # a malformed override must not break startup
-        pass
+        overrides = json.loads(path.read_text())
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        logger.warning("Could not read HTTP header overrides")
+        return
+    if not isinstance(overrides, dict):
+        logger.warning("HTTP header overrides must be an object")
+        return
+    for source, headers in overrides.items():
+        if not isinstance(headers, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
+        ):
+            logger.warning("Ignoring invalid HTTP header profile")
+            continue
+        base, gap = _PROFILES.get(source, _PROFILES["default"])
+        _PROFILES[source] = ({**base, **headers}, gap)
+
+
+_load_overrides(Path(__file__).resolve().parent.parent / "headers.local.json")
 
 _sessions: dict[str, requests.Session] = {}
 _last_call: dict[str, float] = {}
 _lock = threading.Lock()
+_source_locks: dict[str, threading.RLock] = {}
 
 
 def _profile(source: str) -> tuple[dict[str, str], float]:
@@ -86,15 +88,16 @@ _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 def _wait_turn(source: str) -> None:
     gap = _profile(source)[1]
-    with _lock:
-        wait = gap - (time.monotonic() - _last_call.get(source, 0.0))
-        if wait > 0:
-            time.sleep(wait)
-        _last_call[source] = time.monotonic()
+    previous = _last_call.get(source)
+    wait = gap - (time.monotonic() - previous) if previous is not None else 0
+    if wait > 0:
+        time.sleep(wait)
+    _last_call[source] = time.monotonic()
 
 
-def get(source: str, url: str, *, timeout: int = 25, retries: int = 1,
-        backoff: float = 2.0, **kw) -> requests.Response:
+def get(
+    source: str, url: str, *, timeout: int = 25, retries: int = 1, backoff: float = 2.0, **kw
+) -> requests.Response:
     """GET with the right headers, polite spacing, and one retry on transients.
 
     The retry is deliberately small: the on-disk cache already serves the last
@@ -102,16 +105,24 @@ def get(source: str, url: str, *, timeout: int = 25, retries: int = 1,
     nothing. One backed-off retry absorbs the common blip (a dropped
     connection, a 503 during a publish) without turning an outage into a storm.
     """
-    for attempt in range(retries + 1):
-        _wait_turn(source)
-        try:
-            r = session(source).get(url, timeout=timeout, **kw)
-        except (requests.ConnectionError, requests.Timeout):
-            if attempt >= retries:
-                raise
-        else:
-            if r.status_code not in _RETRY_STATUS or attempt >= retries:
-                r.raise_for_status()
-                return r
-        time.sleep(backoff * (attempt + 1))
+    if retries < 0 or backoff < 0:
+        raise ValueError("retries and backoff must be non-negative")
+    with _lock:
+        source_lock = _source_locks.setdefault(source, threading.RLock())
+    # Sessions are shared across Streamlit users. Serialize requests to the
+    # same provider without blocking unrelated providers during throttling.
+    with source_lock:
+        for attempt in range(retries + 1):
+            _wait_turn(source)
+            try:
+                r = session(source).get(url, timeout=timeout, **kw)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt >= retries:
+                    raise
+            else:
+                if r.status_code not in _RETRY_STATUS or attempt >= retries:
+                    r.raise_for_status()
+                    return r
+                r.close()
+            time.sleep(backoff * (attempt + 1))
     raise RuntimeError("unreachable")  # pragma: no cover

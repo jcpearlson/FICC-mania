@@ -6,20 +6,21 @@ from ficc import analytics as an
 
 
 def _s(values, start="2024-01-01", freq="B"):
-    return pd.Series(values, index=pd.date_range(start, periods=len(values), freq=freq),
-                     dtype=float)
+    return pd.Series(
+        values, index=pd.date_range(start, periods=len(values), freq=freq), dtype=float
+    )
 
 
 def test_zscore_reports_span_actually_used():
     s = _s(np.linspace(1, 2, 252 * 3))
     z = an.zscore(s, window_years=5)
-    assert z.window_label == "3y"          # asked for 5y, only 3y exists
+    assert z.window_label == "3y"  # asked for 5y, only 3y exists
     assert z.pct == pytest.approx(100.0)
 
 
 def test_pct_return_divides_by_earlier_value():
     s = _s([100.0, 110.0])
-    assert an.pct_return(s) == pytest.approx(10.0)       # not 110/100-1 vs latest
+    assert an.pct_return(s) == pytest.approx(10.0)  # not 110/100-1 vs latest
     assert an.pct_return(_s([100.0])) is None
 
 
@@ -29,7 +30,7 @@ def test_rolling_beta_matches_refitting_ols():
     y = 2.5 * x + _s(rng.normal(scale=0.3, size=400))
     fast = an.rolling_beta(y, x, 250)
     i = 320
-    slow = an.beta(y.iloc[i - 250:i + 1], x.iloc[i - 250:i + 1], 250)[0]
+    slow = an.beta(y.iloc[i - 250 : i + 1], x.iloc[i - 250 : i + 1], 250)[0]
     assert fast.iloc[i] == pytest.approx(slow, rel=1e-9)
     assert fast.iloc[:249].isna().all()
 
@@ -37,7 +38,7 @@ def test_rolling_beta_matches_refitting_ols():
 def test_duration_limits():
     assert an.duration(5.0, 0) == 0
     assert an.duration(0.0, 10) == 10
-    assert 8.0 < an.duration(4.0, 10) < 8.4      # ~8.18 for a 10y par at 4%
+    assert 8.0 < an.duration(4.0, 10) < 8.4  # ~8.18 for a 10y par at 4%
 
 
 def test_carry_rolldown_flat_curve_has_no_roll():
@@ -55,12 +56,12 @@ def test_excess_over_loss_does_not_double_count_recovery():
 
 def test_net_liquidity_reconciles_units():
     wed = pd.date_range("2025-01-01", periods=4, freq="W-WED")
-    walcl = pd.Series(7_000_000.0, index=wed)                       # $mn
-    tga = pd.Series(800_000.0, index=wed)                            # $mn (WTREGEN)
-    rrp = pd.Series(200.0, index=pd.bdate_range(wed[0], wed[-1]))    # $bn, daily
+    walcl = pd.Series(7_000_000.0, index=wed)  # $mn
+    tga = pd.Series(800_000.0, index=wed)  # $mn (WTREGEN)
+    rrp = pd.Series(200.0, index=pd.bdate_range(wed[0], wed[-1]))  # $bn, daily
     nl = an.net_liquidity(walcl, tga, rrp)
     assert list(nl.index) == list(wed)
-    assert nl.iloc[-1] == pytest.approx(7.0 - 0.8 - 0.2)             # $tn
+    assert nl.iloc[-1] == pytest.approx(7.0 - 0.8 - 0.2)  # $tn
 
 
 def test_common_base_index_uses_shared_start():
@@ -72,9 +73,32 @@ def test_common_base_index_uses_shared_start():
 
 
 def test_cross_market_alignment_does_not_extend_stopped_sources():
-    old = pd.Series([1., 2.], index=pd.to_datetime(['2026-01-01', '2026-01-02']))
-    active = pd.Series(range(16), index=pd.date_range('2026-01-01', periods=16), dtype=float)
-    aligned = an.align_recent({'old': old, 'active': active})
-    assert aligned.index[-1] == pd.Timestamp('2026-01-09')
-    assert aligned['old'].iloc[-1] == 2.
-    assert an.align_recent({'old': old, 'new': active.loc['2026-01-12':]}).empty
+    old = pd.Series([1.0, 2.0], index=pd.to_datetime(["2026-01-01", "2026-01-02"]))
+    active = pd.Series(range(16), index=pd.date_range("2026-01-01", periods=16), dtype=float)
+    aligned = an.align_recent({"old": old, "active": active})
+    assert aligned.index[-1] == pd.Timestamp("2026-01-09")
+    assert aligned["old"].iloc[-1] == 2.0
+    assert an.align_recent({"old": old, "new": active.loc["2026-01-12":]}).empty
+
+
+def test_sparse_recent_sample_does_not_expand_the_requested_window():
+    old = _s(range(60), start="2020-01-01")
+    recent = _s(range(5), start="2026-01-01")
+    assert an.zscore(pd.concat([old, recent]), window_years=1) is None
+
+
+def test_constant_regressor_has_no_identifiable_beta():
+    slope, intercept, r2 = an.beta(_s(range(30)), _s([1.0] * 30))
+    assert np.isnan([slope, intercept, r2]).all()
+
+
+def test_ratio_omits_zero_denominators():
+    result = an.ratio(_s([1.0, 2.0]), _s([0.0, 2.0]))
+    assert list(result) == [1.0]
+
+
+def test_empty_analytics_preserve_table_schema():
+    assert an.curve_snapshot(pd.DataFrame(), {}).empty
+    assert "years" in an.carry_rolldown({}, {}, 4.0).columns
+    assert an.common_base_index({}).empty
+    assert an.align_recent({}).empty

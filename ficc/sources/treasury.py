@@ -1,11 +1,4 @@
-"""US Treasury daily yield curve, straight from home.treasury.gov.
-
-Published same day (~15:30 ET), which makes it fresher than FRED's mirror of
-the same numbers. Requires a browser User-Agent or the request hangs.
-
-Also serves the daily *real* (TIPS) curve and the daily par yield curve for
-prior years, which is what the history-dependent z-scores need.
-"""
+"""US Treasury nominal, real and bill curve CSV adapters."""
 
 from __future__ import annotations
 
@@ -24,17 +17,25 @@ BILL = "daily_treasury_bill_rates"
 
 # Canonical tenor ordering and their maturity in years, for curve plotting.
 TENORS: dict[str, float] = {
-    "1 Mo": 1 / 12, "1.5 Month": 0.125, "2 Mo": 2 / 12, "3 Mo": 0.25,
-    "4 Mo": 4 / 12, "6 Mo": 0.5, "1 Yr": 1, "2 Yr": 2, "3 Yr": 3,
-    "5 Yr": 5, "7 Yr": 7, "10 Yr": 10, "20 Yr": 20, "30 Yr": 30,
+    "1 Mo": 1 / 12,
+    "1.5 Month": 0.125,
+    "2 Mo": 2 / 12,
+    "3 Mo": 0.25,
+    "4 Mo": 4 / 12,
+    "6 Mo": 0.5,
+    "1 Yr": 1,
+    "2 Yr": 2,
+    "3 Yr": 3,
+    "5 Yr": 5,
+    "7 Yr": 7,
+    "10 Yr": 10,
+    "20 Yr": 20,
+    "30 Yr": 30,
 }
 
 
 def _download(year: int, kind: str) -> pd.DataFrame:
-    url = (
-        f"{BASE}/{year}/all?type={kind}"
-        f"&field_tdr_date_value={year}&page&_format=csv"
-    )
+    url = f"{BASE}/{year}/all?type={kind}&field_tdr_date_value={year}&page&_format=csv"
     r = http.get("treasury", url)
     df = pd.read_csv(io.StringIO(r.text))
     df["Date"] = pd.to_datetime(df["Date"], format="%m/%d/%Y", errors="coerce")
@@ -48,17 +49,18 @@ def curve(years: list[int], kind: str = NOMINAL, label: str = "UST par curve") -
     frames, metas = [], []
     for y in years:
         try:
-            f, m = cache.through("treasury", f"{kind}_{y}", cache.TTL_DAILY,
-                                 lambda y=y: _download(y, kind))
+            f, m = cache.through(
+                "treasury", f"{kind}_{y}", cache.TTL_DAILY, lambda y=y: _download(y, kind)
+            )
             frames.append(f)
             metas.append(m)
         except Exception:
             continue
     if not frames:
         return failed("ust_curve", label, "US Treasury", "all years failed")
-    frame = pd.concat(frames).sort_index()
+    frame = pd.concat(frames).sort_index(kind="stable")
     frame = frame[~frame.index.duplicated(keep="last")]
-    latest_frame = max(frames, key=lambda f: f.index.max())
+    latest_frame = max(reversed(frames), key=lambda f: f.index.max())
     frame.attrs[cache.FETCHED_AT] = latest_frame.attrs[cache.FETCHED_AT]
     status = worst_status(metas)
     return Series(

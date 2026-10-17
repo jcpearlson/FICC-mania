@@ -1,21 +1,4 @@
-"""Automated data-quality checks for every fetched series.
-
-The freshness badge answers one question -- is the observation date behind
-its cadence? -- but free data fails in quieter ways too, and each of these has
-happened to a source this app uses:
-
-  * flatline   a dead Yahoo symbol keeps returning its last print, so the
-               series looks alive and never moves.
-  * jump       a unit change or a bad print (a price in cents, a rate in bp)
-               shows up as a single move far outside the series' own history.
-  * gap        a source silently skips weeks -- a holiday is fine, a month is
-               not.
-  * short      a series with too little history for its percentile or
-               z-score to mean anything.
-
-None of these block rendering. They are surfaced on the Sources tab so a
-reader can see which numbers deserve a second look.
-"""
+"""Non-blocking checks for stale dates, flat prices, jumps, gaps and short histories."""
 
 from __future__ import annotations
 
@@ -50,27 +33,63 @@ class Report:
 
 def _numeric_col(s: Series, column: str | None) -> pd.Series:
     if column:
-        return pd.to_numeric(s.frame[column], errors="coerce").dropna()
+        if column not in s.frame:
+            return pd.Series(dtype=float)
+        return (
+            pd.to_numeric(s.frame[column], errors="coerce")
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
     num = s.frame.select_dtypes("number")
-    return num.iloc[:, 0].dropna() if num.shape[1] else pd.Series(dtype=float)
+    return (
+        num.iloc[:, 0].replace([np.inf, -np.inf], np.nan).dropna()
+        if num.shape[1]
+        else pd.Series(dtype=float)
+    )
 
 
 def check_label(s: Series, column: str | None = None) -> str:
     return f"{s.label} · {column}" if column else s.label
 
 
-def assess(s: Series, column: str | None = None, *,
-           flat_obs: int = 7, jump_sigma: float = 8.0,
-           min_years: float = 1.0) -> Report:
+def assess(
+    s: Series,
+    column: str | None = None,
+    *,
+    flat_obs: int = 7,
+    jump_sigma: float = 8.0,
+    min_years: float = 1.0,
+) -> Report:
     """Run every check on one series (optionally one column of a wide frame)."""
     label = check_label(s, column)
     freshness = s.freshness.value
     lag = s.lag_days()
     if not s.ok:
-        return Report(label, s.source, "failed", None, None, s.cadence_days, 0, 0.0,
-                      [s.note or "fetch failed"])
+        return Report(
+            label,
+            s.source,
+            "failed",
+            None,
+            None,
+            s.cadence_days,
+            0,
+            0.0,
+            [s.note or "fetch failed"],
+        )
     col = _numeric_col(s, column)
     n = len(col)
+    if not n:
+        return Report(
+            label,
+            s.source,
+            "failed",
+            s.as_of,
+            lag,
+            s.cadence_days,
+            0,
+            0.0,
+            [f"no finite observations{f' for {column}' if column else ''}"],
+        )
     span = (col.index[-1] - col.index[0]).days / 365.25 if n > 1 else 0.0
     flags: list[str] = []
 
@@ -86,11 +105,14 @@ def assess(s: Series, column: str | None = None, *,
     if s.date_basis == "curve":
         # The index holds delivery dates, not price history. Inspect each
         # contract's quote date instead of treating maturities as daily data.
-        observed = pd.to_datetime(s.frame["observed_at"])
+        observed = pd.to_datetime(
+            s.frame.get("observed_at", pd.Series(dtype="datetime64[ns]")), errors="coerce"
+        )
+        if observed.isna().any() or observed.empty:
+            flags.append("missing contract quote dates")
         if observed.nunique() > 1:
             flags.append(f"mixed quote dates: {observed.min():%d %b}–{observed.max():%d %b}")
-        return Report(label, s.source, freshness, s.as_of, lag, s.cadence_days,
-                      n, 0.0, flags)
+        return Report(label, s.source, freshness, s.as_of, lag, s.cadence_days, n, 0.0, flags)
 
     # Flatline only for market prices. Administered and reference rates
     # (IORB, EFFR) legitimately sit unchanged for weeks; a traded price that
@@ -118,8 +140,7 @@ def assess(s: Series, column: str | None = None, *,
     if span < min_years and s.cadence_days <= 7:
         flags.append(f"short history ({span * 12:.0f}m)")
 
-    return Report(label, s.source, freshness, s.as_of, lag, s.cadence_days,
-                  n, span, flags)
+    return Report(label, s.source, freshness, s.as_of, lag, s.cadence_days, n, span, flags)
 
 
 def assess_many(items: list[tuple[Series | None, str | None]]) -> list[Report]:

@@ -1,15 +1,4 @@
-"""Design tokens and the shared Plotly template.
-
-Every chart in the app draws from this one module, so fifteen panels read as
-one system instead of fifteen default color cycles. The categorical ramp is the
-validated eight-hue order; it clears the lightness band, chroma floor, adjacent
-CVD separation, normal-vision floor, and 3:1 contrast against this app's dark
-surface (#141922). Do not add a ninth hue -- a ninth series folds into "Other"
-or becomes a small multiple.
-
-Ink and chrome are cool-tinted relative to the reference warm-black, because
-this app's surface is navy rather than warm charcoal; luminances are matched.
-"""
+"""Shared design tokens, color conventions and Plotly layout defaults."""
 
 from __future__ import annotations
 
@@ -29,9 +18,8 @@ MUTED = "#93A0B5"
 GRID = "#232B39"
 AXIS = "#333D4F"
 
-# -- categorical: validated dark ramp, fixed order, never cycled ---------
-SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500",
-          "#d55181", "#008300", "#9085e9", "#e66767"]
+# -- categorical palette, fixed order, never cycled ---------
+SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
 BLUE, ORANGE, AQUA, YELLOW, MAGENTA, GREEN, VIOLET, RED = SERIES
 
 # -- sequential (magnitude): single blue hue, light -> dark --------------
@@ -40,9 +28,13 @@ SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#
 # -- diverging (polarity): blue <-> red, neutral gray midpoint -----------
 # Rates convention: red = yields/spreads higher (selloff), blue = lower (rally).
 DIVERGING = [
-    [0.0, "#0d366b"], [0.15, "#256abf"], [0.35, "#86b6ef"],
+    [0.0, "#0d366b"],
+    [0.15, "#256abf"],
+    [0.35, "#86b6ef"],
     [0.5, "#2E3644"],
-    [0.65, "#e88b8b"], [0.85, "#d03b3b"], [1.0, "#7d1f1f"],
+    [0.65, "#e88b8b"],
+    [0.85, "#d03b3b"],
+    [1.0, "#7d1f1f"],
 ]
 
 # -- status: reserved, never reused as a series color --------------------
@@ -73,22 +65,54 @@ def register() -> None:
         # them to different references is what keeps them from colliding when
         # the chart is resized -- the top margin between the two is set in
         # apply(), sized to how many legend rows are actually expected.
-        title=dict(font=dict(size=14, color=INK), x=0, xanchor="left",
-                   y=1.0, yanchor="top", yref="container", pad=dict(t=12, b=0)),
+        title=dict(
+            font=dict(size=14, color=INK),
+            x=0,
+            xanchor="left",
+            y=1.0,
+            yanchor="top",
+            yref="container",
+            pad=dict(t=12, b=0),
+        ),
         colorway=SERIES,
         margin=dict(l=54, r=18, t=78, b=40),
-        xaxis=dict(gridcolor=GRID, zerolinecolor=AXIS, linecolor=AXIS,
-                   tickfont=dict(color=MUTED, size=11), showline=False,
-                   ticks="outside", tickcolor=AXIS, ticklen=4, automargin=True),
-        yaxis=dict(gridcolor=GRID, zerolinecolor=AXIS, linecolor=AXIS,
-                   tickfont=dict(color=MUTED, size=11), showline=False,
-                   ticks="outside", tickcolor=AXIS, ticklen=4, automargin=True),
-        legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0,
-                    font=dict(size=11, color=INK_2), bgcolor="rgba(0,0,0,0)",
-                    itemsizing="constant", itemwidth=30,
-                    tracegroupgap=6),
-        hoverlabel=dict(bgcolor=SURFACE_2, bordercolor=BORDER, font_size=12,
-                        font_family=FONT, font_color=INK),
+        xaxis=dict(
+            gridcolor=GRID,
+            zerolinecolor=AXIS,
+            linecolor=AXIS,
+            tickfont=dict(color=MUTED, size=11),
+            showline=False,
+            ticks="outside",
+            tickcolor=AXIS,
+            ticklen=4,
+            automargin=True,
+        ),
+        yaxis=dict(
+            gridcolor=GRID,
+            zerolinecolor=AXIS,
+            linecolor=AXIS,
+            tickfont=dict(color=MUTED, size=11),
+            showline=False,
+            ticks="outside",
+            tickcolor=AXIS,
+            ticklen=4,
+            automargin=True,
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.03,
+            xanchor="left",
+            x=0,
+            font=dict(size=11, color=INK_2),
+            bgcolor="rgba(0,0,0,0)",
+            itemsizing="constant",
+            itemwidth=30,
+            tracegroupgap=6,
+        ),
+        hoverlabel=dict(
+            bgcolor=SURFACE_2, bordercolor=BORDER, font_size=12, font_family=FONT, font_color=INK
+        ),
         hovermode="x unified",
         colorscale=dict(sequential=SEQ_BLUE, diverging=DIVERGING),
         dragmode="pan",
@@ -101,6 +125,7 @@ def register() -> None:
 
 # Vertical budget, in px, for the band above the plot area.
 
+
 def _legend_rows(fig: go.Figure, chars_per_row: int = 78) -> int:
     """Estimate how many rows a horizontal legend will wrap onto.
 
@@ -109,17 +134,26 @@ def _legend_rows(fig: go.Figure, chars_per_row: int = 78) -> int:
     characters is crude, but it errs toward more headroom, which is the
     forgiving direction -- a little extra whitespace beats overlapping text.
     """
-    names = [t.name for t in fig.data
-             if getattr(t, "name", None) and getattr(t, "showlegend", None) is not False]
+    names = [
+        t.name
+        for t in fig.data
+        if getattr(t, "name", None) and getattr(t, "showlegend", None) is not False
+    ]
     if not names:
         return 0
     # ~6.2px per char at 11px, plus the swatch and gap per entry.
     width = sum(len(n) + 7 for n in names)
-    return max(1, -(-width // chars_per_row))       # ceil division
+    return max(1, -(-width // chars_per_row))  # ceil division
 
 
-def apply(fig: go.Figure, *, height: int = 300, legend: bool = True,
-          unified: bool = True, compact: bool = False) -> go.Figure:
+def apply(
+    fig: go.Figure,
+    *,
+    height: int = 300,
+    legend: bool = True,
+    unified: bool = True,
+    compact: bool = False,
+) -> go.Figure:
     """Final pass every figure goes through before st.plotly_chart.
 
     Sizes the legend band conservatively for narrow charts. Titles are wrapping
@@ -139,8 +173,9 @@ def apply(fig: go.Figure, *, height: int = 300, legend: bool = True,
             margin=dict(l=40, r=10, t=top, b=26),
         )
     else:
-        fig.update_layout(margin=dict(l=48, r=16, t=top, b=40),
-                          legend=dict(y=1.02, yanchor="bottom"))
+        fig.update_layout(
+            margin=dict(l=48, r=16, t=top, b=40), legend=dict(y=1.02, yanchor="bottom")
+        )
 
     fig.update_layout(
         height=height + max(0, top - 12),
@@ -171,8 +206,3 @@ def delta_color(v: float | None, invert: bool = False, mode: str = "perf") -> st
     if invert or mode == "risk":
         up = not up
     return GOOD if up else CRITICAL
-
-
-def status_of(series) -> str:
-    """Map a Series' freshness onto a status token."""
-    return series.freshness.value

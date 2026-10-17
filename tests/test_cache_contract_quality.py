@@ -46,8 +46,12 @@ def test_quality_flags_jump_and_gap():
     vals = [float(i % 5) * 0.01 for i in range(300)] + [50.0]
     r = quality.assess(Series("x", "x", _daily(vals), "FRED"))
     assert any("robust" in f for f in r.flags)
-    gappy = pd.concat([_daily([1.0, 2.0] * 100, end=pd.Timestamp.today() - pd.Timedelta(days=90)),
-                       _daily([3.0, 4.0] * 10)])
+    gappy = pd.concat(
+        [
+            _daily([1.0, 2.0] * 100, end=pd.Timestamp.today() - pd.Timedelta(days=90)),
+            _daily([3.0, 4.0] * 10),
+        ]
+    )
     assert any("gap" in f for f in quality.assess(Series("g", "g", gappy, "FRED")).flags)
 
 
@@ -62,14 +66,15 @@ def test_future_dates_preserved_and_flagged():
     assert s.lag_days() == -3
     assert any("future" in f for f in quality.assess(s).flags)
     from ficc.ui import badge_html
+
     assert "future date" in badge_html(s) and "today" not in badge_html(s)
 
 
 def test_next_day_fx_is_explicit_session():
     from ficc.ui import badge_html
+
     tomorrow = dt.date.today() + dt.timedelta(days=1)
-    s = Series("fx", "FX", _daily([1, 2]), "Yahoo Finance", as_of=tomorrow,
-               date_basis="session")
+    s = Series("fx", "FX", _daily([1, 2]), "Yahoo Finance", as_of=tomorrow, date_basis="session")
     assert "source session" in badge_html(s) and "today" not in badge_html(s)
     assert not any("future" in f for f in quality.assess(s).flags)
 
@@ -87,9 +92,53 @@ def test_cached_and_stale_payloads_keep_actual_pull_time(tmp_cache):
 def test_legacy_cache_uses_write_time(tmp_cache):
     import os
     import pickle
+
     path = cache._path("t", "legacy")
     path.write_bytes(pickle.dumps(_daily([1, 2])))
     stamp = 1700000000
     os.utime(path, (stamp, stamp))
     frame, _, _ = cache.load("t", "legacy", 999)
     assert frame.attrs[cache.FETCHED_AT].timestamp() == stamp
+
+
+def test_interrupted_cache_write_keeps_previous_payload(tmp_cache, monkeypatch):
+    good = _daily([1, 2])
+    cache.store("t", "atomic", good)
+
+    def interrupted(payload, file, **kwargs):
+        file.write(b"partial pickle")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cache.pickle, "dump", interrupted)
+    cache.store("t", "atomic", _daily([10, 20]))
+    frame, _, _ = cache.load("t", "atomic", 999)
+    pd.testing.assert_frame_equal(frame, good)
+    assert not list(cache.CACHE_DIR.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_nonfinite_payload_cannot_replace_cached_data(tmp_cache, value):
+    good = _daily([1, 2])
+    cache.through("t", "finite", 0, lambda: good)
+    frame, meta = cache.through("t", "finite", 0, lambda: _daily([value]))
+    assert meta.startswith("stale")
+    pd.testing.assert_frame_equal(frame, good)
+
+
+def test_cache_directory_is_created_when_writing(monkeypatch, tmp_path):
+    target = tmp_path / "new-cache"
+    monkeypatch.setattr(cache, "CACHE_DIR", target)
+    assert cache.load("t", "k", 999) is None
+    cache.store("t", "k", _daily([1]))
+    assert cache.load("t", "k", 999) is not None
+
+
+def test_missing_column_is_reported_instead_of_raising():
+    series = Series("curve", "Curve", _daily([1, 2]), "Test")
+    report = quality.assess(series, "10Y")
+    assert report.worst == "failed"
+    assert "10Y" in report.flags[0]
+
+
+def test_failed_series_change_is_unavailable():
+    assert failed("x", "X", "Test", "offline").change() is None
