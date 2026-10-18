@@ -78,6 +78,13 @@ CSS = f"""
       background:{theme.SURFACE}; margin:4px 0 10px; color:{theme.INK_2}; }}
   .ficc-quality strong {{ color:{theme.WARNING}; }}
   .ficc-quality-details {{ color:{theme.INK_2}; font-size:12px; line-height:1.65; }}
+  .ficc-moves {{ display:grid; gap:6px; margin-bottom:10px; }}
+  .ficc-move {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:3px 12px;
+      padding:8px 10px; background:{theme.SURFACE}; border:1px solid {theme.BORDER};
+      border-radius:5px; font-size:12px; font-variant-numeric:tabular-nums; }}
+  .ficc-move strong {{ overflow-wrap:anywhere; font-weight:600; }}
+  .ficc-move span, .ficc-move small:last-child {{ text-align:right; }}
+  .ficc-move small {{ color:{theme.MUTED}; font-size:10px; }}
   .ficc-table-scroll {{ overflow-x:auto; max-width:100%; border:1px solid {theme.BORDER};
       border-radius:6px; scrollbar-color:{theme.AXIS} {theme.PAGE}; }}
   [data-testid="stMarkdownContainer"]:has(table.ficc-tbl) {{ overflow-x:auto; }}

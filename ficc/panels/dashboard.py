@@ -8,9 +8,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .. import analytics as an
-from .. import monitor, regime, theme, ui
-from ..sources import market, mof, treasury
-from . import credit as credit_panel
+from .. import dashboard_data, monitor, regime, theme, ui
+from ..sources import mof, treasury
+from . import monitor_view
 from . import overview as overview_panel
 from . import rates as rates_panel
 
@@ -22,20 +22,24 @@ def render(years: list[int]) -> None:
     ui.dense_css()
     st.html(monitor.CSS)
 
-    # Cache hits, not refetches.
-    with st.spinner("Loading Treasury, Japan and funding curves…"):
-        (ust, jgb, sofr_fwd, ff, sofr_on, effr, sofr_avg, extras, move, real) = rates_panel.load(
-            years
-        )
-    with st.spinner("Loading credit spreads and fund prices…"):
-        head, ladder, yields, banks, clo, etfs, vix, defaults = credit_panel.load()
-    with st.spinner("Loading market conditions…"):
-        f, slow, mkt = overview_panel.load()
-    with st.spinner("Loading liquidity and European rates…"):
-        plumbing, cp, eur, estr, _auctions = rates_panel.load_extra()
-    # The shared overview basket has no yen, and the yen is the whole point of
-    # the global block -- pull it here (cached, one symbol).
-    jpy = _usdjpy()
+    preview = st.empty()
+    if "dashboard_loaded" not in st.session_state:
+        with st.spinner("Loading Treasuries…"):
+            early_ust = dashboard_data.load_treasury(years)
+        early_groups = _treasury_groups(early_ust)
+        with preview.container():
+            st.caption("Treasury preview · credit, funding and global markets are loading.")
+            st.markdown(monitor.render_html(early_groups), unsafe_allow_html=True)
+    with st.spinner("Loading credit, funding and global markets…"):
+        data = dashboard_data.load(years)
+    preview.empty()
+    st.session_state.dashboard_loaded = True
+    ust, jgb, sofr_fwd, ff = data.ust, data.jgb, data.sofr_fwd, data.ff
+    sofr_on, effr, extras = data.sofr_on, data.effr, data.extras
+    head, ladder = data.head, data.ladder
+    f, slow, mkt = data.f, data.slow, data.mkt
+    plumbing, cp, eur, estr = data.plumbing, data.cp, data.eur, data.estr
+    move, vix, jpy = data.move, data.vix, data.jpy
 
     hy, ig = head.get("BAMLH0A0HYM2"), head.get("BAMLC0A0CM")
     bb, ccc = ladder.get("BAMLH0A1HYBB"), ladder.get("BAMLH0A3HYC")
@@ -113,40 +117,7 @@ def render(years: list[int]) -> None:
 
     # ---------------------------------------------------- monitor table
     R = monitor.row_from
-    rates_rows = []
-    if ust.ok:
-        if "3 Mo" in ust.frame:
-            rates_rows.append(R(ust, "3m bill", col="3 Mo", mode="rates"))
-        for t in ("2 Yr", "5 Yr", "10 Yr", "30 Yr"):
-            if t in ust.frame.columns:
-                rates_rows.append(R(ust, f"UST {t.replace(' Yr', 'Y')}", col=t, mode="rates"))
-
-    curve_rows = []
-    if ust.ok:
-        for name, lo, hi in (
-            ("2s10s", "2 Yr", "10 Yr"),
-            ("5s30s", "5 Yr", "30 Yr"),
-            ("3m10y", "3 Mo", "10 Yr"),
-        ):
-            if lo in ust.frame.columns and hi in ust.frame.columns:
-                curve_rows.append(_slope_row(ust, name, lo, hi))
-        if {"2 Yr", "5 Yr", "10 Yr"} <= set(ust.frame.columns):
-            # Positive = the belly is cheap to the wings.
-            fly = an.butterfly(ust.frame, "2 Yr", "5 Yr", "10 Yr")
-            if not fly.empty:
-                curve_rows.append(
-                    monitor.Row(
-                        "2s5s10s fly",
-                        fly,
-                        float(fly.iloc[-1]),
-                        unit="bp",
-                        dp=0,
-                        mode="rates",
-                        chg_unit="pts",
-                        chg_dp=0,
-                        as_of=ust.as_of,
-                    )
-                )
+    (_, rates_rows), (_, curve_rows) = _treasury_groups(ust)
 
     front_rows = [
         R(sofr_on, "SOFR o/n", col="percentRate", mode="rates"),
@@ -297,28 +268,29 @@ def render(years: list[int]) -> None:
         ("Volatility & conditions", vol_rows),
         ("Global", global_rows),
     ]
-    derived_inputs = {
-        "2s10s": (ust,),
-        "5s30s": (ust,),
-        "3m10y": (ust,),
-        "2s5s10s fly": (ust,),
-        "SOFR − IORB": tuple(s for s in (sofr_on, iorb) if s is not None),
-        "CP A2/P2 − AA": tuple(cp.values()),
-        "CCC − BB dispersion": tuple(s for s in (ccc, bb) if s is not None),
-        "10y UST − JGB": tuple(s for s in (long_ust, jgb) if s is not None),
-        "10y UST − EUR AAA": tuple(s for s in (long_ust, eur) if s is not None),
+    derived_checks = {
+        "SOFR − IORB": ((sofr_on, "percentRate"), (iorb, None)),
+        "CP A2/P2 − AA": ((cp.get("RIFSPPNA2P2D90NB"), None), (cp.get("DCPN3M"), None)),
+        "CCC − BB dispersion": ((ccc, None), (bb, None)),
+        "10y UST − JGB": ((long_ust, None), (jgb, "10Y")),
+        "10y UST − EUR AAA": ((long_ust, None), (eur, "10Y")),
     }
     for _, rows in groups:
         for row in rows:
-            if row is not None and row.label in derived_inputs:
-                row.inputs = derived_inputs[row.label]
+            if row is not None and row.label in derived_checks:
+                row.input_checks = tuple(
+                    (source, column)
+                    for source, column in derived_checks[row.label]
+                    if source is not None
+                )
+                row.inputs = tuple(source for source, _ in row.input_checks)
     ui.quality_summary(
         [
-            (s, row.check_column)
+            check
             for _, rows in groups
             for row in rows
             if row is not None
-            for s in row.inputs
+            for check in monitor.source_checks(row)
         ]
         + [
             (s, None)
@@ -334,31 +306,7 @@ def render(years: list[int]) -> None:
             if s is not None
         ]
     )
-    with st.expander("Find & export instruments"):
-        query = st.text_input(
-            "Find an instrument", key="monitor_query", placeholder="e.g. HY, JGB, SOFR"
-        )
-        selected_group = st.selectbox(
-            "Instrument group", ["All groups"] + [g for g, _ in groups], key="monitor_group"
-        )
-        shown = monitor.filter_groups(groups, query, selected_group)
-        st.download_button(
-            "Download displayed instruments",
-            monitor.to_frame(shown).to_csv(index=False),
-            "ficc-monitor.csv",
-            "text/csv",
-            key="monitor_csv",
-        )
-    full = st.checkbox(
-        "Show all columns on small screens",
-        key="monitor_full",
-        help="Compact view keeps Last, 1D and As of visible on a phone. "
-        "Full view scrolls horizontally; instrument names stay in place.",
-    )
-    if any(row is not None for _, rows in shown for row in rows):
-        st.markdown(monitor.render_html(shown, full=full), unsafe_allow_html=True)
-    else:
-        st.info("No instruments match. Clear the search or choose All groups.")
+    monitor_view.render(groups)
     st.markdown(
         '<div class="ficc-help">'
         f"One convention throughout: <span style='color:{theme.RED_RATE}'>red</span> "
@@ -438,9 +386,7 @@ def render(years: list[int]) -> None:
         ui.chart(fig, height=H_TALL, compact=True)
     with c2:
         if ust.ok:
-            ch = an.curve_changes(
-                ust.frame, treasury.TENORS, {"1D": 1, "1W": 5, "1M": 21, "3M": 63}
-            )
+            ch = an.curve_changes(ust.frame, treasury.TENORS, dict(monitor.LOOKBACKS))
             cols = [c for c in ("1D", "1W", "1M", "3M") if c in ch.columns]
             raw = ch[cols].T.values.astype(float)
             relative = st.checkbox(
@@ -501,7 +447,7 @@ def render(years: list[int]) -> None:
                     if relative
                     else f"Equal colours mean equal moves across all rows (scale ±{limit:.0f}bp)."
                 )
-                + " Hover for one decimal place. 1W/1M/3M use 5/21/63 trading observations."
+                + " Hover for one decimal place. 1W/1M/3M use calendar lookbacks, as in the monitor."
             )
 
     # Credit leads this section and sits on the left: the eye lands left-first
@@ -699,9 +645,43 @@ def _slope_row(ust, name: str, lo: str, hi: str):
         chg_unit="pts",
         chg_dp=0,
         as_of=ust.as_of,
+        inputs=(ust,),
+        input_checks=((ust, lo), (ust, hi)),
     )
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def _usdjpy():
-    return market.quote("JPY=X", "USDJPY", period="5y")
+def _treasury_groups(ust):
+    rates_rows, curve_rows = [], []
+    if ust.ok:
+        if "3 Mo" in ust.frame:
+            rates_rows.append(monitor.row_from(ust, "3m bill", col="3 Mo", mode="rates"))
+        for tenor in ("2 Yr", "5 Yr", "10 Yr", "30 Yr"):
+            if tenor in ust.frame:
+                rates_rows.append(
+                    monitor.row_from(ust, f"UST {tenor.replace(' Yr', 'Y')}", col=tenor)
+                )
+        for name, lo, hi in (
+            ("2s10s", "2 Yr", "10 Yr"),
+            ("5s30s", "5 Yr", "30 Yr"),
+            ("3m10y", "3 Mo", "10 Yr"),
+        ):
+            if lo in ust.frame and hi in ust.frame:
+                curve_rows.append(_slope_row(ust, name, lo, hi))
+        if {"2 Yr", "5 Yr", "10 Yr"} <= set(ust.frame):
+            fly = an.butterfly(ust.frame, "2 Yr", "5 Yr", "10 Yr")
+            if not fly.empty:
+                curve_rows.append(
+                    monitor.Row(
+                        "2s5s10s fly",
+                        fly,
+                        float(fly.iloc[-1]),
+                        unit="bp",
+                        dp=0,
+                        chg_unit="pts",
+                        chg_dp=0,
+                        as_of=ust.as_of,
+                        inputs=(ust,),
+                        input_checks=tuple((ust, tenor) for tenor in ("2 Yr", "5 Yr", "10 Yr")),
+                    )
+                )
+    return [("US Treasuries", rates_rows), ("Curve", curve_rows)]

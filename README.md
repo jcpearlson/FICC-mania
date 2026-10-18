@@ -42,7 +42,18 @@ rows and carry a fifth of the information, and on a glance page the number of
 instruments visible before you scroll *is* the product.
 
 The monitor also has instrument search, group filtering and a CSV export with explicit units.
+Save an ordered watchlist under **Find, watchlist & export**, then switch to
+**My watchlist** or make it the default view. Preferences stay on this machine
+in `.local/watchlist.json`, separate from market data and cache clearing.
+
+Above the table, **Unusual daily moves** ranks the displayed instruments by
+the size of each move against that instrument's own prior daily changes over
+up to three years. At least 60 prior comparisons are required. The current
+move is excluded from the reference sample; stale, weekly and suspect inputs
+are excluded from ranking. Each result shows its comparison dates. This is a
+percentile of move size, separate from the table's percentile of the level.
 The tenor heatmap defaults to a shared bp scale; relative row scaling is optional.
+Its daily and calendar lookbacks match the monitor.
 
 The table uses **one directional convention throughout** — red means the number
 rose, blue means it fell, for every row and for the sparkline. Not good/bad:
@@ -61,8 +72,10 @@ the curve, the policy path, IG/HY, CCC−BB dispersion, SOFR−IORB, carry and
 roll-down, and the USDJPY beta to UST−JGB.
 
 Ordering is the design — the further down something sits, the less often it
-changes the answer to "how is fixed income doing right now". The page reuses
-the other tabs' cached loaders. Tabs load only when opened, with visible source-group loading feedback.
+changes the answer to "how is fixed income doing right now". The dashboard shows
+a Treasury preview before the remaining sources finish, requests only its own
+inputs, and loads independent providers concurrently while retaining source
+throttles and disk-cache fallback. Tabs load only when opened.
 
 **Market health** — a five-component cross-asset risk regime score (credit, vol,
 financial conditions, growth proxy, equity trend). This is a descriptive heuristic,
@@ -156,6 +169,8 @@ ficc/
   contract.py           Series record: as_of vs fetched_at, status, freshness
   http.py               Per-source headers + rate limiting  (see note below)
   cache.py              On-disk TTL cache with stale fallback
+  dashboard_data.py     Dashboard inputs and concurrent provider loading
+  workspace.py          Local saved watchlist preferences
   analytics.py          Z-scores, curve maths, carry/roll-down, rolling beta,
                         net liquidity, regime scoring
   quality.py            Per-series data-quality checks (Sources tab)

@@ -126,28 +126,45 @@ def curve_snapshot(
 
 
 def curve_changes(
-    frame: pd.DataFrame, tenor_map: dict[str, float], offsets: dict[str, int]
+    frame: pd.DataFrame,
+    tenor_map: dict[str, float],
+    offsets: dict[str, int | pd.DateOffset | None],
 ) -> pd.DataFrame:
-    """Per-tenor change in bp over several lookbacks -- the morning 'what moved' grid."""
+    """Per-tenor changes in bp, using row counts or calendar offsets.
+
+    Calendar lookbacks start at each tenor's latest finite observation and use
+    the last available value on or before the target date. Integer lookbacks
+    retain their frame-row convention. None compares the previous finite
+    observation when it is no more than four calendar days earlier.
+    """
     cols = [c for c in frame.columns if c in tenor_map]
+    columns = ["tenor", "years", "level", *offsets]
     if frame.empty:
-        return pd.DataFrame(columns=["tenor", "years", "level", *offsets])
-    latest = frame[cols].iloc[-1]
-    out = {
-        "tenor": cols,
-        "years": [tenor_map[c] for c in cols],
-        "level": [float(latest[c]) if pd.notna(latest[c]) else np.nan for c in cols],
-    }
-    for name, off in offsets.items():
-        if off < len(frame):
-            prior = frame[cols].iloc[-1 - off]
-            out[name] = [
-                (float(latest[c]) - float(prior[c])) * BP
-                if pd.notna(latest[c]) and pd.notna(prior[c])
-                else np.nan
-                for c in cols
-            ]
-    return pd.DataFrame(out).sort_values("years")
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for col in cols:
+        values = pd.to_numeric(frame[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        finite = values.dropna().sort_index()
+        if finite.empty:
+            continue
+        row = {"tenor": col, "years": tenor_map[col], "level": float(finite.iloc[-1])}
+        for name, offset in offsets.items():
+            if offset is None:
+                current = float(finite.iloc[-1])
+                prior = (
+                    float(finite.iloc[-2])
+                    if len(finite) >= 2 and (finite.index[-1] - finite.index[-2]).days <= 4
+                    else None
+                )
+            elif isinstance(offset, pd.DateOffset):
+                prior = value_at_or_before(finite, finite.index[-1] - offset)
+                current = float(finite.iloc[-1])
+            else:
+                prior = float(values.iloc[-1 - offset]) if 0 <= offset < len(values) else None
+                current = float(values.iloc[-1])
+            row[name] = (current - prior) * BP if prior is not None else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns).sort_values("years")
 
 
 def butterfly(frame: pd.DataFrame, wing1: str, body: str, wing2: str) -> pd.Series:

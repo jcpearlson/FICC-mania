@@ -102,3 +102,57 @@ def test_empty_analytics_preserve_table_schema():
     assert "years" in an.carry_rolldown({}, {}, 4.0).columns
     assert an.common_base_index({}).empty
     assert an.align_recent({}).empty
+
+
+def test_curve_calendar_lookback_matches_monitor_across_holidays():
+    dates = pd.to_datetime(
+        ["2025-12-30", "2025-12-31", "2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07"]
+    )
+    frame = pd.DataFrame({"10Y": [4.0, 4.1, 4.2, 4.3, 4.4, 4.5]}, index=dates)
+    changed = an.curve_changes(frame, {"10Y": 10}, {"Week": pd.DateOffset(weeks=1), "Five rows": 5})
+    assert changed["Week"].iloc[0] == pytest.approx(40)
+    assert changed["Five rows"].iloc[0] == pytest.approx(50)
+
+
+def test_curve_calendar_changes_anchor_to_each_tenors_last_finite_date():
+    dates = pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-08", "2026-01-09"])
+    frame = pd.DataFrame(
+        {"2Y": [3.0, 3.1, 3.2, np.nan], "10Y": [4.0, 4.1, 4.2, 4.3], "30Y": [np.nan] * 4},
+        index=dates,
+    )
+    changed = an.curve_changes(
+        frame,
+        {"2Y": 2, "10Y": 10, "30Y": 30},
+        {"Week": pd.DateOffset(weeks=1), "Year": pd.DateOffset(years=1)},
+    ).set_index("tenor")
+    assert changed.index.tolist() == ["2Y", "10Y"]
+    assert changed.loc["2Y", "level"] == pytest.approx(3.2)
+    assert changed.loc["2Y", "Week"] == pytest.approx(20)
+    assert changed.loc["10Y", "Week"] == pytest.approx(20)
+    assert changed["Year"].isna().all()
+
+
+def test_curve_changes_preserve_schema_for_unavailable_offsets():
+    frame = pd.DataFrame({"2Y": [3.0]}, index=pd.to_datetime(["2026-01-01"]))
+    changed = an.curve_changes(frame, {"2Y": 2}, {"Day": 1, "Week": pd.DateOffset(weeks=1)})
+    assert changed[["Day", "Week"]].isna().all().all()
+
+
+def test_curve_daily_changes_use_recent_finite_observations_per_tenor():
+    dates = pd.to_datetime(["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-08", "2026-01-09"])
+    frame = pd.DataFrame(
+        {
+            "1Y": [2.0, np.nan, np.nan, np.nan, 2.1],
+            "2Y": [3.0, 3.1, 3.2, 3.3, np.nan],
+            "10Y": [4.0, 4.1, 4.2, 4.3, 4.4],
+        },
+        index=dates,
+    )
+    changed = an.curve_changes(
+        frame, {"1Y": 1, "2Y": 2, "10Y": 10}, {"Daily": None, "One row": 1}
+    ).set_index("tenor")
+    assert changed.loc["2Y", "level"] == pytest.approx(3.3)
+    assert changed.loc["2Y", "Daily"] == pytest.approx(10)
+    assert np.isnan(changed.loc["2Y", "One row"])
+    assert changed.loc["10Y", "Daily"] == pytest.approx(10)
+    assert np.isnan(changed.loc["1Y", "Daily"])

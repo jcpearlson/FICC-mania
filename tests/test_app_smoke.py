@@ -66,10 +66,10 @@ def test_initial_page_is_lazy_and_refresh_preserves_pull_time(fake_net, tmp_path
     assert any(p.stat().st_mtime_ns != before.get(p.name) for p in tmp_path.glob("*.pkl"))
     assert cache.CACHE_DIR == tmp_path
     assert "Page rendered" in " ".join(m.value for m in at.markdown)
-    at.checkbox[0].check().run()
+    at.checkbox("monitor_full").check().run()
     assert not at.exception
     assert "mon mon-full" in " ".join(m.value for m in at.markdown)
-    at.checkbox[0].uncheck().run()
+    at.checkbox("monitor_full").uncheck().run()
     assert "mon mon-compact" in " ".join(m.value for m in at.markdown)
     at.selectbox[0].select("Sources").run()
     assert not at.exception
@@ -101,7 +101,7 @@ def test_monitor_filter_and_heatmap_scale_controls(fake_net):
         )
 
     assert "shared bp scale" in heatmap()["layout"]["meta"]["caption"]
-    at.checkbox[1].check().run()
+    at.checkbox("heatmap_relative").check().run()
     assert "relative within each row" in heatmap()["layout"]["meta"]["caption"]
     at.selectbox[0].select("Market health").run()
     assert not at.exception

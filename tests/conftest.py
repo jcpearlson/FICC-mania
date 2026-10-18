@@ -14,9 +14,10 @@ def fake_net(monkeypatch, tmp_path):
     import fakenet
     import yfinance
 
-    from ficc import cache, http
+    from ficc import cache, http, workspace
 
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(workspace, "WATCHLIST_PATH", tmp_path / "watchlist.json")
     monkeypatch.setattr(http, "get", fakenet.fake_get)
     monkeypatch.setattr(yfinance, "download", fakenet.fake_download)
     return fakenet

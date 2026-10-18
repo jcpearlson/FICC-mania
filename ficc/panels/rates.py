@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .. import analytics as an
-from .. import theme, ui
+from .. import monitor, theme, ui
 from ..sources import ecb, fred, market, mof, nyfed, treasury, treasurydirect
 
 # Fed balance sheet plumbing. Units differ at source and are reconciled in
@@ -286,10 +286,8 @@ def render(years: list[int]) -> None:
     with c2:
         # Per-tenor change grid -- the "what moved overnight" read.
         if ust.ok:
-            ch = an.curve_changes(
-                ust.frame, treasury.TENORS, {"1d": 1, "1w": 5, "1m": 21, "3m": 63}
-            )
-            cols = [c for c in ("1d", "1w", "1m", "3m") if c in ch.columns]
+            ch = an.curve_changes(ust.frame, treasury.TENORS, dict(monitor.LOOKBACKS))
+            cols = [c for c, _ in monitor.LOOKBACKS if c in ch.columns]
             fig = go.Figure(
                 go.Heatmap(
                     z=ch[cols].T.values,
@@ -315,6 +313,7 @@ def render(years: list[int]) -> None:
                 xaxis=dict(tickangle=-45),
             )
             ui.chart(fig, height=340, legend=False, unified=False)
+            st.caption("1W/1M/3M use calendar lookbacks, as in the monitor.")
 
     # ---- policy path + front end ---------------------------------------
     c1, c2, c3 = ui.columns(3)

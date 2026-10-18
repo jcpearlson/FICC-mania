@@ -6,12 +6,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from . import analytics as an
 from . import quality, theme
 from . import sparkline as sp
-from .contract import Series
+from .contract import Series, Status, now
 from .ui import esc
 
 # Lookbacks are calendar offsets, not observation counts. Counting rows
@@ -45,6 +46,7 @@ class Row:
     chg_dp: int | None = None  # override decimals on change columns
     inputs: tuple[Series, ...] = ()  # provenance also travels with derived rows
     check_column: str | None = None
+    input_checks: tuple[tuple[Series, str | None], ...] = ()
 
 
 def row_from(
@@ -89,10 +91,18 @@ def row_from(
     )
 
 
+def source_checks(row: Row) -> tuple[tuple[Series, str | None], ...]:
+    """Use the actual source columns for derived rows, preserving simple-row defaults."""
+    if row.input_checks:
+        return row.input_checks
+    column = row.check_column if len(row.inputs) == 1 else None
+    return tuple((source, column) for source in row.inputs)
+
+
 def row_issues(row: Row) -> list[str]:
     issues = []
-    for s in row.inputs:
-        report = quality.assess(s, row.check_column if len(row.inputs) == 1 else None)
+    for s, column in source_checks(row):
+        report = quality.assess(s, column)
         for flag in report.flags:
             issues.append(f"{report.label}: {flag}")
     return list(dict.fromkeys(issues))
@@ -193,6 +203,145 @@ def to_frame(groups) -> pd.DataFrame:
             "As of",
             "Warnings",
         ],
+    )
+
+
+MOVE_COLUMNS = [
+    "Group",
+    "Instrument",
+    "Change",
+    "Change unit",
+    "Previous date",
+    "As of",
+    "Absolute move percentile",
+    "Sample count",
+]
+
+
+def _daily_moves(values: pd.Series, unit: str) -> pd.Series:
+    if values.empty:
+        return pd.Series(index=values.index, dtype=float)
+    values = values[values.index >= values.index[-1] - pd.DateOffset(years=3)]
+    gaps = values.index.to_series().diff().dt.total_seconds() / 86400
+    if unit == "%":
+        changes = (values / values.shift().where(values.shift() != 0) - 1) * 100
+    else:
+        changes = values.diff() * (100 if unit == "bp" else 1)
+    return changes.where(gaps.between(1, MAX_1D_GAP_DAYS)).replace([np.inf, -np.inf], np.nan)
+
+
+def _latest_jump(moves: pd.Series) -> bool:
+    history = moves.iloc[:-1].dropna()
+    if len(history) < 60 or pd.isna(moves.iloc[-1]):
+        return False
+    median = float(history.median())
+    scale = float((history - median).abs().median()) * 1.4826
+    return scale > 0 and abs(float(moves.iloc[-1]) - median) > 8 * scale
+
+
+def _recent_date(stamp, today, *, cadence=1.0, session=False) -> bool:
+    if stamp is None or pd.isna(stamp):
+        return False
+    age = (today - pd.Timestamp(stamp).date()).days
+    return (-1 if session else 0) <= age <= cadence + 3
+
+
+def _usable_input(source: Series, column: str | None, today) -> bool:
+    if (
+        not source.ok
+        or source.status in (Status.STALE, Status.FAILED)
+        or source.cadence_days > MAX_1D_GAP_DAYS
+        or source.date_basis == "curve"
+    ):
+        return False
+    session = source.date_basis == "session"
+    if not _recent_date(source.as_of, today, cadence=source.cadence_days, session=session):
+        return False
+    if column is not None:
+        if column not in source.frame:
+            return False
+        raw = source.frame[column]
+    else:
+        numeric = source.frame.select_dtypes("number")
+        if numeric.empty:
+            return False
+        raw = numeric.iloc[:, 0]
+    values = pd.to_numeric(raw, errors="coerce").sort_index()
+    if values.empty or not np.isfinite(values.iloc[-1]):
+        return False
+    if not _recent_date(values.index[-1], today, cadence=source.cadence_days, session=session):
+        return False
+    values = values.replace([np.inf, -np.inf], np.nan).dropna()
+    if source.source.startswith("Yahoo") and len(values) >= 7 and values.iloc[-7:].nunique() == 1:
+        return False
+    return not _latest_jump(_daily_moves(values, "pts"))
+
+
+def rank_moves(groups, limit: int = 5, as_of=None) -> pd.DataFrame:
+    """Rank daily moves by their absolute empirical percentile in prior history.
+
+    Each instrument uses up to three calendar years of its own changes, with
+    at least 60 prior daily comparisons. The current move is excluded from
+    that sample. Dates and sample counts make different publication calendars
+    visible; a percentile describes historical size, not statistical odds.
+    """
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    today = pd.Timestamp(as_of).date() if as_of is not None else now().astimezone().date()
+    records = []
+    for group, rows in groups:
+        for row in rows:
+            if row is None or row.series is None or row.value is None:
+                continue
+            values = pd.to_numeric(row.series, errors="coerce").sort_index()
+            if values.empty or not np.isfinite(values.iloc[-1]) or not np.isfinite(row.value):
+                continue
+            session = any(source.date_basis == "session" for source in row.inputs)
+            stamp = row.as_of if row.as_of is not None else values.index[-1]
+            if not _recent_date(stamp, today, session=session):
+                continue
+            if not all(
+                _usable_input(source, column, today) for source, column in source_checks(row)
+            ):
+                continue
+            if not _recent_date(values.index[-1], today, session=session):
+                continue
+            values = values.replace([np.inf, -np.inf], np.nan).dropna()
+            moves = _daily_moves(values, row.chg_unit)
+            if (
+                len(moves) < 2
+                or pd.isna(moves.iloc[-1])
+                or moves.iloc[-1] == 0
+                or _latest_jump(moves)
+            ):
+                continue
+            history = moves.iloc[:-1].dropna().abs()
+            if len(history) < 60:
+                continue
+            change = float(moves.iloc[-1])
+            records.append(
+                {
+                    "Group": group,
+                    "Instrument": row.label,
+                    "Change": change,
+                    "Change unit": (
+                        "bp"
+                        if row.chg_unit == "bp" or row.unit == "bp"
+                        else "%"
+                        if row.chg_unit == "%"
+                        else "points"
+                    ),
+                    "Previous date": values.index[-2],
+                    "As of": values.index[-1],
+                    "Absolute move percentile": float((history <= abs(change)).mean() * 100),
+                    "Sample count": len(history),
+                }
+            )
+    return (
+        pd.DataFrame(records, columns=MOVE_COLUMNS)
+        .sort_values(["Absolute move percentile", "Instrument"], ascending=[False, True])
+        .head(limit)
+        .reset_index(drop=True)
     )
 
 
